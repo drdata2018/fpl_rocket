@@ -326,3 +326,83 @@ def test_from_planning_state_uses_low_ft_and_stamps_user_edits():
     assert plan.explanation[0].startswith("User-edited")
     # missing low_history column = all False
     assert from_planning_state(state, players, xp_df.drop(columns="low_history")).low_history == frozenset()
+
+
+# ------------------------------------------------------------------------------- HiGHS scheduler, limits
+_SCHEDULER_SCRIPT = """
+import sys
+sys.path[:0] = [{src!r}, {tests!r}]
+import pulp
+import fpl_rocket.planner.core as core
+from fpl_rocket.planner import MULTI_GW, PlanSettings, solve
+from planner_synth import planner_input
+
+if {disable_reset!r}:
+    core.reset_highs_scheduler = lambda: None
+# something else in the process runs HiGHS with the default thread count first
+p = pulp.LpProblem("other", pulp.LpMaximize)
+x = pulp.LpVariable("x", 0, 10, cat="Integer")
+p += x
+p += x <= 5
+p.solve(pulp.HiGHS(msg=False))
+assert pulp.LpStatus[p.status] == "Optimal"
+for _ in range(2):
+    plan = solve(planner_input(), PlanSettings(objective=MULTI_GW, horizon=3))
+    print(plan.status, "|", plan.reason, "|", plan.explanation[0])
+"""
+
+
+def _run_scheduler_script(disable_reset: bool) -> list[str]:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    code = _SCHEDULER_SCRIPT.format(
+        src=str(root / "src"), tests=str(root / "tests"), disable_reset=disable_reset
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip().splitlines()
+
+
+def test_planner_solves_after_another_highs_run_in_the_process():
+    # a fresh process: HiGHS's task scheduler is process-wide (a default-threads run made every later
+    # threads=1 planner run fail and silently return the hold plan as "time limit reached")
+    lines = _run_scheduler_script(disable_reset=False)
+    assert len(lines) == 2 and all(ln.startswith("optimal |") for ln in lines), lines
+
+
+def test_a_solver_failure_is_an_explicit_error_never_a_silent_hold():
+    lines = _run_scheduler_script(disable_reset=True)  # the bug, without the fix
+    assert len(lines) == 2 and all(ln.startswith("solver_error |") for ln in lines), lines
+    assert all("time limit" not in ln.split("|")[1] and "SOLVER ERROR" in ln for ln in lines), lines
+
+
+def test_solver_error_status_and_time_limited_flag(monkeypatch):
+    inp = planner_input()
+    monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("solver_error", "the solver failed to run (x)"))
+    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=2))
+    assert plan.status == "solver_error" and not plan.time_limited
+    assert plan.explanation[0].startswith("SOLVER ERROR, no plan was solved")
+    _, scenarios = chip_scenarios(planner_input(chips=ALL_CHIPS), PlanSettings(objective=MULTI_GW, horizon=2))
+    assert scenarios and {sc.status for sc in scenarios} <= {"solver_error", "not available"}
+    assert all(sc.gain != sc.gain for sc in scenarios)  # no gain from an unsolved plan
+    monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("timeout", "the solver reached its 10 s time limit"))
+    assert solve(inp, PlanSettings(objective=MULTI_GW, horizon=2)).time_limited
+    monkeypatch.undo()
+    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=2))
+    assert plan.status == "optimal" and not plan.time_limited
+
+
+def test_time_limits_interactive_10_batch_60():
+    import inspect
+
+    from fpl_rocket import matched, registry
+    from fpl_rocket.planner import BATCH_TIME_LIMIT_S, TIME_LIMIT_S
+
+    assert TIME_LIMIT_S == 10.0 and BATCH_TIME_LIMIT_S == 60.0
+    assert PlanSettings().time_limit == TIME_LIMIT_S  # the app's default
+    assert inspect.signature(matched.run_season).parameters["time_limit"].default == BATCH_TIME_LIMIT_S
+    assert inspect.signature(registry.build_registry).parameters["time_limit"].default is None  # -> 60
+    assert core.MAX_CONCURRENT_SOLVES == 1

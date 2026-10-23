@@ -65,7 +65,13 @@ Community Cloud free tier, data jobs run on GitHub Actions and are published as 
   hourly and automatic.
 - **Switches** (code constants, changed by a commit): `SHOW_SHADOW_PLANS` in `src/fpl_rocket/config.py`
   (False = no plan is shown; True re-enables the plan UI as built), `REGISTRY_START_GW = 9` in
-  `src/fpl_rocket/registry.py`, `BUNDLE_N_SIMS = 4000` in `src/fpl_rocket/model/config.py`.
+  `src/fpl_rocket/registry.py`, `BUNDLE_N_SIMS = 4000` in `src/fpl_rocket/model/config.py`, solver time
+  limits in `src/fpl_rocket/planner/core.py` (`TIME_LIMIT_S = 10` for app solves, `BATCH_TIME_LIMIT_S = 60`
+  for `registry_write.py` and `run_matched.py`; both scripts take `--time-limit`).
+- **Solver health:** HiGHS keeps one process-wide scheduler, so the planner resets it before every run and
+  runs one solve at a time. A solver that fails to run gives a plan with status `solver_error` (never a
+  silent hold); the registry meta lists `plans_hit_time_limit` and `plans_solver_error`, and a solver
+  error scores as `status=error`.
 - The day-1 hosting probe page (`app_pages/hosting_spike.py`) is kept but not in the navigation.
 
 ## Code map

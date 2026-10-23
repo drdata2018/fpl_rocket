@@ -21,6 +21,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fpl_rocket import matched  # noqa: E402
+from fpl_rocket.planner import BATCH_TIME_LIMIT_S  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -70,7 +71,12 @@ def main() -> int:
     ap.add_argument("--seasons", nargs="+", default=["2024-25", "2025-26"])
     ap.add_argument("--archive", default=str(ROOT / "data" / "archive" / "all_gws.parquet"))
     ap.add_argument("--out", default=str(ROOT / "data" / "backtests"))
-    ap.add_argument("--time-limit", type=float, default=10.0)
+    ap.add_argument(
+        "--time-limit",
+        type=float,
+        default=BATCH_TIME_LIMIT_S,
+        help="per-solve time limit in seconds (default 60; 10 s under load moved a season ~90 points)",
+    )
     args = ap.parse_args()
     df = pd.read_parquet(args.archive)
     t0 = time.perf_counter()

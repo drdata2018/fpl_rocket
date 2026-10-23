@@ -107,6 +107,9 @@ def test_writer_records_plans_baseline_and_meta(built):
     assert meta["roster"][0] == 7630179
     assert meta["model_version"] == "v0.1-test" and meta["model_n_sims"] == 4000
     assert set(meta["objectives"]) == {"model", "model_b", "model_c"} == set(plans["objectives"])
+    assert meta["solver_time_limit_s"] == 60.0
+    assert meta["plans_hit_time_limit"] == [] and meta["plans_solver_error"] == []
+    assert plans["entries"][0]["model_c"]["settings"]["time_limit"] == 60.0
 
 
 def test_writer_records_objectives_a_b_and_c(built):
@@ -221,3 +224,24 @@ def test_pending_gws_start_and_data_checked():
     assert registry.pending_gws(boot, scored=set(), start=9) == [9]
     assert registry.pending_gws(boot, scored={9}, start=9) == []
     assert json.loads(json.dumps(registry.missing_row(9, "x")))["status"] == "missing"
+
+
+def test_meta_records_time_limit_hits_and_solver_errors_score_as_errors(monkeypatch, tmp_path):
+    from fpl_rocket.planner import core
+
+    pool, bootstrap, xp_df, state, baseline, manifest = _world()
+    ids = registry.REGISTRY_ENTRY_IDS
+    kw = dict(manifest=manifest, bootstrap=bootstrap, xp=xp_df, baseline=baseline, states={ids[0]: state})
+    monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("timeout", "the solver reached its 5 s time limit"))
+    _, plans, meta = registry.build_registry(**kw, time_limit=5)
+    assert meta["solver_time_limit_s"] == 5.0
+    assert set(meta["plans_hit_time_limit"]) == {
+        f"{ids[0]}/{k}" for k in ("model", "model_b", "model_c", "baseline")
+    }
+    monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("solver_error", "the solver failed to run (x)"))
+    reg_xp, plans, meta = registry.build_registry(**kw)
+    assert len(meta["plans_solver_error"]) == 4 and plans["entries"][0]["model"]["status"] == "solver_error"
+    live = _live(pool, next(iter(pool)))
+    rows = registry.score_gw(GW, reg_xp, plans, meta, live, {}, bootstrap)
+    entry = rows[1]
+    assert entry["status"] == "error" and entry["reason"].startswith("solver error")

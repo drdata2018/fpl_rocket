@@ -51,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--archive", default="data/archive/all_gws.parquet")
     ap.add_argument("--cache", default=None, help="optional raw JSON cache directory (tests)")
     ap.add_argument("--offline", action="store_true")
+    ap.add_argument(
+        "--time-limit",
+        type=float,
+        default=None,
+        help="per-solve limit in seconds (default 60, the app uses 10)",
+    )
     args = ap.parse_args(argv)
 
     bdir = Path(args.bundle)
@@ -89,7 +95,13 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 - recorded per entry
             errors[entry_id] = f"{type(exc).__name__}: {exc}"
     reg_xp, plans, meta = registry.build_registry(
-        manifest=manifest, bootstrap=shared.bootstrap, xp=xp, baseline=baseline, states=states, errors=errors
+        manifest=manifest,
+        bootstrap=shared.bootstrap,
+        xp=xp,
+        baseline=baseline,
+        states=states,
+        errors=errors,
+        time_limit=args.time_limit,
     )
     paths = registry.write_files(args.out, reg_xp, plans, meta)
     ok = sum(1 for e in plans["entries"] if e["status"] == "ok")
@@ -100,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
     for e in plans["entries"]:
         st = {k: (e.get(k) or {}).get("status", "-") for k in registry.PLAN_KEYS}
         print(f"  entry {e['entry_id']}: {e['status']} {st if e['status'] == 'ok' else e.get('error')}")
+    print(
+        f"  time limit {meta['solver_time_limit_s']:g} s; hit it: {meta['plans_hit_time_limit'] or 'none'};"
+        f" solver errors: {meta['plans_solver_error'] or 'none'}"
+    )
     for p in paths:
         print(f"  {p} ({p.stat().st_size:,} bytes)")
     return 0

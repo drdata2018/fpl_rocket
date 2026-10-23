@@ -1,7 +1,8 @@
-"""Legal FPL planner (PuLP + CBC): see core.py for the program, inputs.py for the app adapters, lineup.py for
-solver-free line-ups (best XI, bench order, automatic substitutions, realised points)."""
+"""Legal FPL planner (PuLP + HiGHS): see core.py for the program, inputs.py for the app adapters, lineup.py
+for solver-free line-ups (best XI, bench order, automatic substitutions, realised points)."""
 
 from .core import (
+    BATCH_TIME_LIMIT_S,
     CHIP_LABELS,
     CHIPS,
     DECAY_OPTIONS,
@@ -29,6 +30,7 @@ from .inputs import StateEdits, from_planning_state, low_history_set, plan_key, 
 from .lineup import FORMATION, auto_subs, bench_order, best_xi, captain_pair, realised_points
 
 __all__ = [
+    "BATCH_TIME_LIMIT_S",
     "CHIPS",
     "CHIP_LABELS",
     "DECAY_OPTIONS",

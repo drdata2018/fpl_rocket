@@ -134,6 +134,7 @@ def _plan_record(plan: Any) -> JSON:
         "hits": gp.hits,
         "hit_cost": gp.hit_cost,
         "chip": gp.chip,
+        "time_limited": bool(plan.time_limited),
         "expected_points": round(gp.expected_points, 3),
         "expected_total": round(plan.expected_total, 3),
         "path": [
@@ -175,12 +176,15 @@ def build_registry(
     states: dict[int, Any],
     errors: dict[int, str] | None = None,
     created_at: str | None = None,
+    time_limit: float | None = None,
 ) -> tuple[pd.DataFrame, JSON, JSON]:
     """(registry_xp, registry_plans, registry_meta) from already-built pieces (pure; tested offline).
 
-    states: {entry_id: PlanningState} for the roster ids that could be built; errors: {entry_id: reason}."""
+    states: {entry_id: PlanningState} for the roster ids that could be built; errors: {entry_id: reason}.
+    time_limit: per-solve limit in seconds (default planner.BATCH_TIME_LIMIT_S = 60; the app uses 10)."""
     from . import views
     from .planner import (
+        BATCH_TIME_LIMIT_S,
         MULTI_GW,
         ONE_GW_NO_TRANSFERS,
         ONE_GW_WITH_TRANSFERS,
@@ -190,6 +194,7 @@ def build_registry(
     )
 
     errors = dict(errors or {})
+    limit = float(time_limit or BATCH_TIME_LIMIT_S)
     gw = int(manifest.get("next_event") or min(int(g) for g in xp["gw"].unique()))
     reg_xp = xp.copy()
     if "low_history" not in reg_xp:
@@ -210,7 +215,7 @@ def build_registry(
             continue
         st = states[entry_id]
         try:
-            settings = PlanSettings(objective=ONE_GW_NO_TRANSFERS)
+            settings = PlanSettings(objective=ONE_GW_NO_TRANSFERS, time_limit=limit)
             one_gw = from_planning_state(st, players, xp[xp["gw"] == gw], bootstrap=bootstrap)
             model_plan = solve(one_gw, settings)
             base_plan = solve(from_planning_state(st, players, base_df, bootstrap=bootstrap), settings)
@@ -225,7 +230,7 @@ def build_registry(
                     if objective == ONE_GW_WITH_TRANSFERS
                     else from_planning_state(st, players, xp[xp["gw"] >= gw], bootstrap=bootstrap)
                 )
-                shadow[key] = _plan_record(solve(inp, PlanSettings(objective=objective)))
+                shadow[key] = _plan_record(solve(inp, PlanSettings(objective=objective, time_limit=limit)))
             except Exception as exc:  # noqa: BLE001 - (a) is still recorded and scored
                 shadow[key] = {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
         entries.append(
@@ -247,6 +252,13 @@ def build_registry(
             }
         )
     plans = {"bundle_id": str(manifest["bundle_id"]), "gw": gw, "objectives": PLAN_KEYS, "entries": entries}
+    solved = [
+        (e["entry_id"], key, e[key])
+        for e in entries
+        if e["status"] == "ok"
+        for key in (*PLAN_KEYS, "baseline")
+        if isinstance(e.get(key), dict)
+    ]
     gw_xp = reg_xp[reg_xp["gw"] == gw]
     meta = {
         "gw": gw,
@@ -259,6 +271,10 @@ def build_registry(
         "model_n_sims": manifest.get("model_n_sims"),
         "rules_version": manifest.get("rules_version"),
         "objectives": PLAN_KEYS,
+        "solver_time_limit_s": limit,
+        # did any roster plan stop at the time limit (accepted within the gap or fallback) or fail to solve?
+        "plans_hit_time_limit": [f"{eid}/{key}" for eid, key, r in solved if r.get("time_limited")],
+        "plans_solver_error": [f"{eid}/{key}" for eid, key, r in solved if r.get("status") == "solver_error"],
         "baseline": BASELINE_NAME,
         "roster": list(REGISTRY_ENTRY_IDS),
         "exclusions": {
@@ -381,6 +397,11 @@ def score_gw(
             rows.append({**row, "status": "error", "reason": e.get("error", "")})
             continue
         mp, bp = e["model"], e["baseline"]
+        if "solver_error" in (mp.get("status"), bp.get("status")):
+            rows.append(
+                {**row, "status": "error", "reason": f"solver error: {mp.get('reason') or bp.get('reason')}"}
+            )
+            continue
         squad = mp["squad"]
         row.update(
             status="ok",
@@ -399,7 +420,7 @@ def score_gw(
         )
         for key, tag in (("model_b", "b"), ("model_c", "c")):
             sp = e.get(key)
-            if not sp or not sp.get("xi"):
+            if not sp or not sp.get("xi") or sp.get("status") == "solver_error":
                 continue
             real = realised_points(sp["xi"], sp["bench"], sp["captain"], sp["vice"], pts, mins, et)
             row[f"xi_model_{tag}_pts"] = int(real["points"]) - int(sp.get("hit_cost") or 0)

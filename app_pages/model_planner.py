@@ -172,6 +172,9 @@ def _plan_section(tid: int, inp, players: pd.DataFrame) -> None:
     plan = data.plan(tid, key, bundle_id, PlanSettings(objective=ONE_GW_NO_TRANSFERS), inp)
     gp = plan.first()
     st.subheader(f"GW{gp.gw} plan: best XI from your squad (no transfers)")
+    if plan.status == "solver_error":
+        st.error(f"The solver failed, no plan was solved: {plan.reason}.")
+        return
     if plan.status != "optimal":
         st.warning(f"Fallback plan: {plan.reason}.")
     names = inp.names

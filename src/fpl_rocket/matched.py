@@ -46,6 +46,7 @@ import pandas as pd
 from .backtest import LOW_HISTORY_GWS, PLAYER_TYPES, PREDICTORS, Predictor, gw_average_proxy, rolling_origin
 from .model.features import low_history
 from .planner import (
+    BATCH_TIME_LIMIT_S,
     MULTI_GW,
     ONE_GW_WITH_TRANSFERS,
     Candidate,
@@ -189,7 +190,7 @@ def initial_squad(
         max_transfers=None,
         pool_top=((1, 10), (2, 30), (3, 30), (4, 20)),
         pool_cheapest=5,
-        time_limit=60,
+        time_limit=BATCH_TIME_LIMIT_S,
     )
     plan = solve(inp, settings)
     if plan.status != "optimal":
@@ -215,7 +216,7 @@ def run_season(
     horizon: int = HORIZON,
     max_transfers: int = MAX_TRANSFERS,
     decay: float = DECAY,
-    time_limit: float = 10.0,
+    time_limit: float = BATCH_TIME_LIMIT_S,
     log: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     """One row per (policy, GW) for one season. predictors: {"model": ..., "baseline": ...}."""
@@ -248,7 +249,7 @@ def run_season(
             score = {e: xp.get((e, t), 0.0) for e in st.squad}
             t_in: list[int] = []
             t_out: list[int] = []
-            status, solve_s = "hold", 0.0
+            status, solve_s, limited = "hold", 0.0, False
             if policy != "hold" and t != first:
                 inp = PlannerInput(
                     squad=_owned(st, info, last),
@@ -270,8 +271,10 @@ def run_season(
                         time_limit=time_limit,
                     ),
                 )
+                if plan.status == "solver_error":  # never scored as a silent hold
+                    raise RuntimeError(f"{season} GW{t} {policy}: {plan.reason}")
                 gp = plan.first()
-                status, solve_s = plan.status, plan.solve_seconds
+                status, solve_s, limited = plan.status, plan.solve_seconds, plan.time_limited
                 t_in, t_out = gp.transfers_in, gp.transfers_out
                 sell = {o.element: o.selling_price for o in inp.squad}
                 for e in t_out:
@@ -314,6 +317,7 @@ def run_season(
                     "squad": ",".join(str(e) for e in sorted(st.squad)),
                     "status": status,
                     "solve_s": round(solve_s, 2),
+                    "time_limited": limited,
                 }
             )
             st.free_transfers = (
@@ -374,6 +378,7 @@ def summarise(
                 "net_minus_average": float(excess.sum()),
                 "max_drawdown_vs_average": max_drawdown(excess),
                 "fallback_plans": int((g["status"] == "fallback").sum()),
+                "time_limited_plans": int(g["time_limited"].sum()) if "time_limited" in g else 0,
             }
         )
     summary = pd.DataFrame(out)

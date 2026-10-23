@@ -36,7 +36,7 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -86,7 +86,7 @@ jobs:
         id: registry
         if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
         continue-on-error: true
-        timeout-minutes: 8
+        timeout-minutes: 20
         env:
           DIR: ${{ steps.build.outputs.path }}
         run: uv run --no-sync python scripts/registry_write.py --bundle "$DIR" --out data/registry --archive data/archive/all_gws.parquet

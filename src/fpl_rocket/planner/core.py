@@ -23,11 +23,17 @@ follows the rules' chip_week_policy.
 Players flagged low_history (unreliable predictions) are never captain or vice and never transfer-in
 candidates; owned ones may stay in the XI (the plan says so).
 
-Solver: HiGHS through PuLP (in-process; CBC selectable, see make_solver), 1 thread, time limit 10 s, at most
-two concurrent solves per process, started from the hold plan. A plan is used when proven optimal, or when the
-time limit is reached with a plan within ACCEPT_GAP (1%) of the proven bound (the plan says so). Anything else
-(infeasible, time limit with a larger gap) returns the FALLBACK plan = hold the squad + best XI by xP, with
-the reason. Deterministic given inputs (sorted candidates and variables, single thread, fixed seed), except
+Solver: HiGHS through PuLP (in-process; CBC selectable, see make_solver), 1 thread, started from the hold
+plan. Time limit = PlanSettings.time_limit: TIME_LIMIT_S (10 s) for interactive app solves, BATCH_TIME_LIMIT_S
+(60 s) for the registry writer and the matched backtest (a 10 s limit under machine load produced fallbacks
+that moved a whole backtest season by ~90 points). HiGHS keeps ONE process-wide task scheduler: once anything
+in the process has run HiGHS with another thread count, every later threads=1 run fails at once. So the
+scheduler is reset before every HiGHS run and runs are serialised (one at a time per process). A plan is used
+when proven optimal, or when the time limit is reached with a plan within ACCEPT_GAP (1%) of the proven bound
+(the plan says so; Plan.time_limited). Infeasible, or the time limit with a larger gap, returns the FALLBACK
+plan = hold the squad + best XI by xP, with the reason. A solver that fails to run returns
+status "solver_error" (never a silent hold): the squad is held for display only and the reason says why.
+Deterministic given inputs (sorted candidates and variables, single thread, fixed seed), except
 that a time-limited solve can depend on machine speed.
 """
 
@@ -56,7 +62,8 @@ OBJECTIVE_LABELS = {
 DECAY_OPTIONS = (0.7, 0.85, 1.0)
 DEFAULT_DECAY = 0.85
 DEFAULT_HORIZON = 5
-TIME_LIMIT_S = 10.0
+TIME_LIMIT_S = 10.0  # interactive (app) solves
+BATCH_TIME_LIMIT_S = 60.0  # registry_write.py and the matched backtest (scripts/run_matched.py)
 CHIPS = ("wildcard", "freehit", "bboost", "3xc")
 CHIP_LABELS = {
     "wildcard": "Wildcard",
@@ -66,7 +73,8 @@ CHIP_LABELS = {
 }
 FIRST_GW_CHIPS = ("wildcard", "freehit")
 VICE_WEIGHT = 1e-3  # picks the best non-captain as vice without moving the XI
-MAX_CONCURRENT_SOLVES = 2
+# one HiGHS run at a time per process: the scheduler reset before each run is process-wide (see the docstring)
+MAX_CONCURRENT_SOLVES = 1
 # a plan found at the time limit is accepted when within this relative gap of the proven bound
 ACCEPT_GAP = 0.01
 # stopping rule: a plan proven within 0.5% of the bound is final (a 5-GW objective of ~190 points: < 1 point);
@@ -171,6 +179,7 @@ class PlanSettings:
             "objective": self.objective,
             "horizon": self.horizon if self.objective == MULTI_GW else 1,
             "decay": self.decay,
+            "time_limit": self.time_limit,
             "max_transfers": self.max_transfers if self.transfers_on else 0,
             "allow_hits": self.allow_hits and self.transfers_on,
             "chip": self.chip,
@@ -201,13 +210,14 @@ class GWPlan:
 class Plan:
     objective: str
     settings: dict[str, Any]
-    status: str  # "optimal" | "fallback"
+    status: str  # "optimal" | "fallback" | "solver_error"
     reason: str
     gws: list[GWPlan]
     objective_value: float
     solve_seconds: float
     explanation: list[str]
     warnings: list[str] = field(default_factory=list)
+    time_limited: bool = False  # the solver stopped at its time limit (accepted within the gap, or fallback)
 
     @property
     def expected_total(self) -> float:
@@ -234,7 +244,7 @@ class ChipScenario:
     base_points: float  # expected points of the plan without the chip (net of hits, undiscounted)
     chip_points: float  # same, with the chip
     gain: float  # conditional gain inside the evaluated window
-    status: str  # "solved" | "not available" | "fallback"
+    status: str  # "solved" | "not available" | "fallback" | "solver_error"
     reason: str = ""
     plan: Plan | None = None
 
@@ -308,15 +318,37 @@ class _HiGHSWarm(pulp.HiGHS):  # type: ignore[misc, valid-type]
 
     warm = False
 
-    def callSolver(self, lp: pulp.LpProblem) -> None:  # noqa: N802 - PuLP's name
-        if self.warm:
-            import highspy
+    run_status: Any = None
 
+    def callSolver(self, lp: pulp.LpProblem) -> None:  # noqa: N802 - PuLP's name
+        import highspy
+
+        if self.warm:
             start = highspy.HighsSolution()
             start.col_value = [float(v.varValue or 0.0) for v in lp.variables()]
             start.value_valid = True
             lp.solverModel.setSolution(start)
-        lp.solverModel.run()
+        # HiGHS's task scheduler is process-wide: a run with another thread count anywhere in the process
+        # (another library, a default-threads solve) makes every later threads=1 run fail immediately.
+        reset_highs_scheduler()
+        self.run_status = lp.solverModel.run()
+
+
+def reset_highs_scheduler() -> None:
+    """Reset HiGHS's process-wide task scheduler (callers hold _SOLVER_SLOTS: no other run is active)."""
+    import highspy
+
+    highspy.Highs.resetGlobalScheduler(True)
+
+
+def _highs_failed(solver: pulp.LpSolver) -> str | None:
+    """Why the last HiGHS run failed (None when it ran)."""
+    status = getattr(solver, "run_status", None)
+    if status is None:
+        return None
+    import highspy
+
+    return None if status != highspy.HighsStatus.kError else f"HiGHS run returned {status}"
 
 
 def _solve_status(
@@ -326,9 +358,17 @@ def _solve_status(
     warm: bool = False,
     gap: float | None = None,
 ) -> tuple[str, str]:
-    """Run the solver (bounded concurrency). ('optimal', '') or (kind, human reason)."""
-    with _SOLVER_SLOTS:
-        prob.solve(make_solver(solver, time_limit, warm, gap))
+    """Run the solver (one at a time per process). ('optimal', '') or (kind, human reason); kind is one of
+    optimal | infeasible | timeout | solver_error | error."""
+    s = make_solver(solver, time_limit, warm, gap)
+    try:
+        with _SOLVER_SLOTS:
+            prob.solve(s)
+    except Exception as exc:  # noqa: BLE001 - surfaced as an explicit solver error, never a silent hold
+        return "solver_error", f"the solver failed to run ({type(exc).__name__}: {exc})"
+    failed = _highs_failed(s)
+    if failed:
+        return "solver_error", f"the solver failed to run ({failed})"
     if prob.status == pulp.LpStatusOptimal and prob.sol_status == pulp.LpSolutionOptimal:
         g = mip_gap(prob)
         return "optimal", "" if not g or g < 1e-4 else f"plan proven within {g:.2%} of the bound"
@@ -337,7 +377,7 @@ def _solve_status(
     if prob.sol_status == pulp.LpSolutionIntegerFeasible:
         gap = mip_gap(prob)
         if gap is not None and gap <= ACCEPT_GAP:
-            return "optimal", f"time limit reached; best plan found is within {gap:.2%} of the proven bound"
+            return "optimal", f"{TIME_LIMIT_REACHED}; best plan found is within {gap:.2%} of the proven bound"
         txt = "" if gap is None else f" (best plan found was {gap:.1%} from the bound)"
         return "timeout", f"the solver reached its {time_limit:g} s time limit before proving a plan{txt}"
     if prob.status == pulp.LpStatusNotSolved:
@@ -352,6 +392,8 @@ def mip_gap(prob: pulp.LpProblem) -> float | None:
     except Exception:  # noqa: BLE001 - CBC or no solver model
         return None
 
+
+TIME_LIMIT_REACHED = "time limit reached"
 
 # module-level hook so tests can simulate a solver timeout without a large problem
 SOLVE = _solve_status
@@ -432,12 +474,23 @@ def solve(inp: PlannerInput, settings: PlanSettings | None = None) -> Plan:
     warm = m.warm_start()
     gap = settings.mip_gap if settings.objective == MULTI_GW else None
     kind, reason = SOLVE(m.prob, settings.time_limit, settings.solver, warm, gap)
+    if kind == "solver_error":
+        plan = hold_plan(inp, settings, gws, reason, t0)
+        plan.status = "solver_error"
+        plan.explanation = [
+            f"SOLVER ERROR, no plan was solved: {reason}. The squad is shown held for display only.",
+            *plan.explanation[1:],
+        ]
+        return plan
     if kind != "optimal":
         if kind == "infeasible" and club_excess(inp):
             reason += " (the squad breaks the club limit and must be restored)"
-        return hold_plan(inp, settings, gws, reason, t0)
+        plan = hold_plan(inp, settings, gws, reason, t0)
+        plan.time_limited = kind == "timeout"
+        return plan
     plan = m.extract(time.perf_counter() - t0)
     plan.reason = reason
+    plan.time_limited = reason.startswith(TIME_LIMIT_REACHED)
     plan.explanation = explain(inp, plan) + ([f"Solver: {reason}."] if reason else [])
     plan.warnings = _warnings(inp, plan)
     return plan
@@ -844,7 +897,11 @@ def chip_scenarios(inp: PlannerInput, settings: PlanSettings) -> tuple[Plan, lis
                 base.expected_total,
                 plan.expected_total,
                 plan.expected_total - base.expected_total if ok else float("nan"),  # no gain from a fallback
-                "solved" if ok else "fallback",
+                "solved"
+                if ok
+                else "solver_error"
+                if "solver_error" in (plan.status, base.status)
+                else "fallback",
                 plan.reason or base.reason,
                 plan,
             )
