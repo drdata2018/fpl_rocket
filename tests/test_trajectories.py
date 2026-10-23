@@ -4,12 +4,14 @@ and hits."""
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 
 import pandas as pd
 import pytest
 
 from fpl_rocket import trajectories as tr
+from fpl_rocket.rules.season_2026_27 import TRANSFERS
 from planner_synth import league
 
 GWS = (1, 2, 3, 4, 5)
@@ -56,13 +58,13 @@ def world():
     return pool, _xp_frame(xp), boot, baseline, top
 
 
-def _inp(world, gw: int, xp: pd.DataFrame | None = None) -> tr.StepInputs:
+def _inp(world, gw: int, xp: pd.DataFrame | None = None, flat_baseline: bool = False) -> tr.StepInputs:
     pool, xp_df, boot, baseline, _ = world
     return tr.StepInputs(
         gw=gw,
         bootstrap=boot,
         xp=xp_df if xp is None else xp,
-        baseline_per_fixture=baseline,
+        baseline_per_fixture={e: 0.0 for e in baseline} if flat_baseline else baseline,
         bundle_id=f"b{gw}",
         time_limit=20,
     )
@@ -145,7 +147,11 @@ def test_carry_forward_missing_week_and_accounting(world, run):
         )
         assert t4["bank"] == s1["start_bank"] + moves >= 0
         for r in (r2, r4):
-            assert len(r["transfers_in"]) == len(r["transfers_out"]) <= policy.max_transfers
+            assert (
+                len(r["transfers_in"])
+                == len(r["transfers_out"])
+                <= policy.transfer_limit(r["free_transfers"])
+            )
             assert r["hits"] == max(0, len(r["transfers_in"]) - r["free_transfers"])
             if not policy.allow_hits:
                 assert r["hits"] == 0
@@ -301,3 +307,84 @@ def test_a_release_read_error_never_restarts_the_trajectories(monkeypatch):
     codes["deadline-gw10"] = 404
     codes["deadline-gw9"] = 404
     assert tr.latest_state("https://example.invalid/releases", 12) is None
+
+
+def _stars(world, owned: set[int], k: int = 2) -> list[int]:
+    """k cheap non-owned midfielders from different clubs."""
+    pool, *_ = world
+    mids = sorted(
+        (c for c in pool.values() if c.element_type == 3 and c.element not in owned and c.element != 1),
+        key=lambda c: (c.buy, c.element),
+    )
+    out: list[int] = []
+    for c in mids:
+        if all(pool[e].team != c.team for e in out):
+            out.append(c.element)
+        if len(out) == k:
+            return out
+    raise AssertionError("not enough stars")
+
+
+def test_restrained_rule_is_free_transfers_only():
+    for name in ("model_restrained", "form_restrained"):
+        p = tr.BY_NAME[name]
+        assert p.restrained and p.max_transfers is None and not p.allow_hits
+        assert [p.transfer_limit(f) for f in (0, 1, 2, 5)] == [0, 1, 2, 5]
+        assert p.describe()["rule"] == tr.RESTRAINED_RULE
+    assert tr.BY_NAME["model_aggressive"].transfer_limit(0) == 2
+    assert tr.BY_NAME["hold"].transfer_limit(5) == 0
+
+
+def test_free_only_banks_one_week_and_spends_two_the_next_without_a_hit(world, run, tmp_path):
+    _, (s1, _), *_ = run
+    _, xp_df, *_ = world
+    # GW2: nothing is worth a move -> the free transfer is banked (not wasted)
+    s2, p2 = tr.step(s1, _inp(world, 2, xp_df.assign(xp=0.0), flat_baseline=True))
+    for name in ("model_restrained", "form_restrained"):
+        rec, t = p2["trajectories"][name], s2["trajectories"][name]
+        assert rec["free_transfers"] == 1 and rec["transfers_in"] == [] and rec["hits"] == 0
+        assert t["free_transfers_next"] == 2
+        assert t["policy"]["max_transfers"] is None and t["policy"]["rule"] == tr.RESTRAINED_RULE
+    # the banked count is carried in the published state and read back at the next deadline
+    tr.write_files(tmp_path / "deadline-gw2", s2, p2)
+    k, prev = tr.latest_state(str(tmp_path), 3, start=1)
+    assert k == 2 and prev["trajectories"]["model_restrained"]["free_transfers_next"] == 2
+    # GW3: two players become irresistible -> both bought with the two free transfers, no hit
+    stars = _stars(world, set(s1["start_squad"]))
+    boosted = xp_df.copy()
+    boosted.loc[boosted["element"].isin(stars), "xp"] = 25.0
+    s3, p3 = tr.step(prev, _inp(world, 3, boosted))
+    rec = p3["trajectories"]["model_restrained"]
+    assert rec["free_transfers"] == 2 and sorted(rec["transfers_in"]) == sorted(stars)
+    assert rec["hits"] == 0 and rec["hit_cost"] == 0
+    assert s3["trajectories"]["model_restrained"]["free_transfers_next"] == 1
+    for name in ("model_restrained", "form_restrained"):
+        r = p3["trajectories"][name]
+        assert r["hits"] == 0 and len(r["transfers_in"]) <= r["free_transfers"]
+
+
+def test_free_transfer_bank_is_capped_at_five(world, run):
+    _, (s1, _), *_ = run
+    _, xp_df, *_ = world
+    full = json.loads(json.dumps(s1))
+    for t in full["trajectories"].values():
+        t["free_transfers_next"] = 5
+    # a missing week cannot push the bank above the cap either
+    rolled = json.loads(json.dumps(full))
+    assert tr._roll_missing(rolled, 3, TRANSFERS) == [2]
+    assert {t["free_transfers_next"] for t in rolled["trajectories"].values()} == {5}
+    s2, p2 = tr.step(full, _inp(world, 2, xp_df.assign(xp=0.0), flat_baseline=True))
+    for name in ("model_restrained", "form_restrained", "hold"):
+        assert p2["trajectories"][name]["free_transfers"] == 5
+        assert s2["trajectories"][name]["free_transfers_next"] == 5  # min(5, 5 + 1)
+    stars = _stars(world, set(s1["start_squad"]))
+    boosted = xp_df.copy()
+    boosted.loc[boosted["element"].isin(stars), "xp"] = 25.0
+    s2b, p2b = tr.step(full, _inp(world, 2, boosted))
+    # with 5 banked the restrained policy may make up to 5 transfers (every one the objective gains from)
+    for name in ("model_restrained", "form_restrained"):
+        rec = p2b["trajectories"][name]
+        n = len(rec["transfers_in"])
+        assert rec["free_transfers"] == 5 and n <= 5 and rec["hits"] == 0
+        assert s2b["trajectories"][name]["free_transfers_next"] == min(5, 5 - n + 1)
+    assert set(stars) <= set(p2b["trajectories"]["model_restrained"]["transfers_in"])

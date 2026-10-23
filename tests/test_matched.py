@@ -157,11 +157,31 @@ def test_restrained_set_from_the_most_owned_start_never_takes_a_hit():
     squad = [int(e) for e in gw1["squad"].iloc[0].split(",")]
     assert int(owners.idxmax()) in squad  # the most-owned player starts
     planned = rows[rows["policy"] != "hold"]
-    assert (planned["hits"] == 0).all() and (planned["transfers"] <= 1).all()
-    assert (planned["net"] == planned["points"]).all()
+    # free_only (default): transfers <= the free transfers entering the GW, never a hit, bank capped at 5
+    assert matched.restrained_policies("free_only") == matched.RESTRAINED
+    assert (planned["hits"] == 0).all() and (planned["transfers"] <= planned["free_transfers"]).all()
+    assert (planned["net"] == planned["points"]).all() and planned["free_transfers"].between(1, 5).all()
+    for _, g in planned.groupby("policy"):  # FT state carried: f' = min(5, f - n + 1)
+        g = g.sort_values("gw")
+        later = g[g["gw"] > 1]
+        nxt = np.minimum(5, later["free_transfers"] - later["transfers"] + 1).to_numpy()[:-1]
+        assert (later["free_transfers"].to_numpy()[1:] == nxt).all()
     summary, paired = matched.summarise(rows, resamples=100)
     assert [tuple(p) for p in paired[["a", "b"]].to_numpy()] == list(matched.PAIRS["restrained"])
     assert paired["sign_test_p"].between(0, 1).all()
+    # the step 3g rule stays selectable: at most 1 transfer per GW
+    one = matched.run_season(
+        df,
+        "2024-25",
+        preds,
+        policies=matched.restrained_policies("one_per_gw"),
+        start="most_owned",
+        time_limit=20,
+    )
+    one = one[one["policy"] != "hold"]
+    assert (one["hits"] == 0).all() and (one["transfers"] <= 1).all()
+    with pytest.raises(ValueError, match="unknown restrained rule"):
+        matched.restrained_policies("two_per_gw")
 
 
 def test_sign_test_exact_binomial():

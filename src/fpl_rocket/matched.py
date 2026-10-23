@@ -33,12 +33,14 @@ MODEL minus BASELINE with a moving-block bootstrap CI (block 4, 2000 resamples).
 comparison; the inputs are end-of-GW archive data (see the retrospective-track caveats).
 
 Options (step 3g): policies=RESTRAINED replays the prospective virtual managers' rule
-(fpl_rocket.trajectories: MODEL_RESTRAINED / FORM_RESTRAINED = <= 1 transfer per GW, never a hit, vs HOLD);
-start="most_owned" uses their published start rule (the most-owned legal 15 at GW1); fixtures_as_known gives
-the planner the schedule as known at each deadline (fpl_rocket.fixtures_known) instead of the as-played one
-(scoring is unchanged); season_inputs caches the per-season predictions so such replays reuse the same
-refits. summarise reports paired differences for the set's pairs with a moving-block bootstrap within seasons
-and a sign test.
+(fpl_rocket.trajectories: MODEL_RESTRAINED / FORM_RESTRAINED, never a hit, vs HOLD) under RESTRAINED_RULES:
+"free_only" (step 3h, the default and the trajectories' rule: transfers per GW <= the free transfers banked
+under the rules, cap 5) or "one_per_gw" (step 3g: <= 1 transfer per GW, kept so that report stays
+reproducible; restrained_policies(rule)); start="most_owned" uses their published start rule (the
+most-owned legal 15 at GW1); fixtures_as_known gives the planner the schedule as known at each deadline
+(fpl_rocket.fixtures_known) instead of the as-played one (scoring is unchanged); season_inputs caches the
+per-season predictions so such replays reuse the same refits. summarise reports paired differences for the
+set's pairs with a moving-block bootstrap within seasons and a sign test.
 """
 
 from __future__ import annotations
@@ -259,7 +261,7 @@ class PolicySpec:
 
     name: str
     source: str  # "model" | "baseline"
-    max_transfers: int = MAX_TRANSFERS
+    max_transfers: int | None = MAX_TRANSFERS  # None = no fixed limit (no hits: the free transfers)
     allow_hits: bool = True
     hold: bool = False
 
@@ -269,12 +271,26 @@ AGGRESSIVE: tuple[PolicySpec, ...] = (
     PolicySpec("baseline", "baseline"),
     PolicySpec("hold", "baseline", 0, False, hold=True),
 )
-# the prospective trajectories' restrained rule (fpl_rocket.trajectories): <= 1 transfer per GW, never a hit
-RESTRAINED: tuple[PolicySpec, ...] = (
-    PolicySpec("model_restrained", "model", 1, False),
-    PolicySpec("form_restrained", "baseline", 1, False),
-    PolicySpec("hold", "baseline", 0, False, hold=True),
-)
+# the restrained rule, never a hit: "free_only" = transfers per GW <= the free transfers available (banked
+# under the rules, cap 5; the prospective trajectories' rule from step 3h); "one_per_gw" = <= 1 per GW (3g)
+RESTRAINED_RULES = {"free_only": None, "one_per_gw": 1}
+DEFAULT_RESTRAINED_RULE = "free_only"
+
+
+def restrained_policies(rule: str = DEFAULT_RESTRAINED_RULE) -> tuple[PolicySpec, ...]:
+    """MODEL_RESTRAINED / FORM_RESTRAINED / HOLD under the restrained `rule` (RESTRAINED_RULES)."""
+    if rule not in RESTRAINED_RULES:
+        raise ValueError(f"unknown restrained rule {rule!r}; one of {sorted(RESTRAINED_RULES)}")
+    limit = RESTRAINED_RULES[rule]
+    return (
+        PolicySpec("model_restrained", "model", limit, False),
+        PolicySpec("form_restrained", "baseline", limit, False),
+        PolicySpec("hold", "baseline", 0, False, hold=True),
+    )
+
+
+RESTRAINED = restrained_policies("free_only")
+RESTRAINED_ONE_PER_GW = restrained_policies("one_per_gw")
 POLICY_SETS = {"aggressive": AGGRESSIVE, "restrained": RESTRAINED}
 PAIRS = {
     "aggressive": (("model", "baseline"),),
@@ -486,6 +502,10 @@ def run_season(
                 bench = bench_order([e for e in squad if e not in xi], et, score)
             n = len(t_in)
             hits = 0 if t == first else max(0, n - st.free_transfers)
+            if hits and not spec.allow_hits:
+                raise AssertionError(
+                    f"{season} GW{t} {spec.name}: {n} transfers with {st.free_transfers} free"
+                )
             res = realised_points(xi, bench, cap, vice, pts, mins, et)
             net = res["points"] - TRANSFERS.hit_cost * hits
             ft_in = st.free_transfers

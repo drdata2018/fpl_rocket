@@ -7,11 +7,20 @@ recorded before it, scored after the gameweek.
 The four managers (TRAJECTORIES), all from the SAME start squad, chips never used:
     model_aggressive   planner objective (c): horizon 3, decay 0.85, <= 2 transfers per GW, hits allowed when
                        the objective says so, on the model's xP (xp.parquet as issued)
-    model_restrained   the same predictions and horizon, <= 1 transfer per GW, never a hit (free transfers are
-                       banked under the rules when the objective prefers it)
+    model_restrained   the same predictions and horizon under the RESTRAINED rule (RESTRAINED_RULE, step 3h):
+                       transfers this GW <= the free transfers available this GW, never a hit
     form_restrained    the restrained rule on the frozen baseline (form per 90 x availability: the per-fixture
                        prediction behind registry_xp's `baseline_xp`, times the fixture count of each GW)
     hold               never transfers; best XI + captain by the baseline each GW
+
+RESTRAINED rule (free_only): the transfers made in a GW never exceed the free transfers available entering it
+(banked by the rules engine: +1 per GW, capped at TransferRules.max_bank = 5; the balance after a wildcard /
+free-hit week follows the rules' chip_week_policy, never reached because the trajectories play no chips), and
+a hit is never taken. A restrained manager may therefore bank a transfer when nothing is worth doing and spend
+two or more later, like a disciplined human. There is no minimum-gain threshold: the planner uses a free
+transfer whenever its 3-GW decayed objective gains anything at all (a known simplification; a human might keep
+the transfer for a marginal gain). In step 3g the rule was "<= 1 transfer per GW" (matched.RESTRAINED_RULES
+keeps it selectable as one_per_gw for the retrospective replay).
 Every manager: players flagged low_history are never captain / vice and never bought (planner rule); players
 the game marks unselectable (can_select False or removed) are never bought.
 
@@ -72,26 +81,47 @@ START_RULE = (
 )
 
 
+RESTRAINED_RULE = (
+    "transfers this GW <= the free transfers available (banked by the rules engine, cap 5), never a hit; "
+    "no minimum gain: a free transfer is used whenever the horizon objective gains anything"
+)
+
+
 @dataclass(frozen=True)
 class TrajectoryPolicy:
     name: str
     label: str
     source: str  # "model" | "baseline": the predictions the policy plans with
-    max_transfers: int
+    max_transfers: int | None  # per GW; None = no fixed limit (with allow_hits False: the free transfers)
     allow_hits: bool
     hold: bool = False
+
+    @property
+    def restrained(self) -> bool:
+        return not self.hold and self.max_transfers is None and not self.allow_hits
+
+    def transfer_limit(self, free_transfers: int) -> int:
+        """Most transfers this policy may make in a GW entered with `free_transfers`."""
+        if self.hold:
+            return 0
+        if self.allow_hits:
+            return int(self.max_transfers) if self.max_transfers is not None else 10**6
+        free = max(0, int(free_transfers))
+        return free if self.max_transfers is None else min(free, int(self.max_transfers))
 
     def describe(self) -> JSON:
         out = asdict(self)
         if not self.hold:
             out.update(objective="multi_gw", horizon=HORIZON, decay=DECAY, chips="never")
+        if self.restrained:
+            out["rule"] = RESTRAINED_RULE
         return out
 
 
 TRAJECTORIES: tuple[TrajectoryPolicy, ...] = (
     TrajectoryPolicy("model_aggressive", "Model, aggressive", "model", 2, True),
-    TrajectoryPolicy("model_restrained", "Model, restrained", "model", 1, False),
-    TrajectoryPolicy("form_restrained", "Form, restrained", "baseline", 1, False),
+    TrajectoryPolicy("model_restrained", "Model, restrained", "model", None, False),
+    TrajectoryPolicy("form_restrained", "Form, restrained", "baseline", None, False),
     TrajectoryPolicy("hold", "Hold (no transfers)", "baseline", 0, False, hold=True),
 )
 BY_NAME = {p.name: p for p in TRAJECTORIES}
@@ -440,6 +470,7 @@ def step(
     plans: dict[str, JSON] = {}
     for policy in TRAJECTORIES:
         t = state["trajectories"][policy.name]
+        t["policy"] = policy.describe()  # the rule in force at this deadline
         xp = preds[policy.source]
         squad_ids = [int(m["element"]) for m in t["squad"]]
         # current club / position from the bootstrap (a player can change club mid-season)
@@ -537,6 +568,8 @@ def step(
                 record["hit_cost"] = int(gp.hit_cost)
                 if not policy.allow_hits and gp.hits:
                     raise AssertionError(f"{policy.name}: a hit in a no-hit policy")
+                if len(gp.transfers_in) > policy.transfer_limit(ft):
+                    raise AssertionError(f"{policy.name}: {len(gp.transfers_in)} transfers with {ft} free")
                 t["bank"] = int(t["bank"]) + sum(record["sell"].values()) - sum(record["buy"].values())
                 if t["bank"] != int(gp.bank_after):
                     raise AssertionError(f"{policy.name}: bank {t['bank']} != plan {gp.bank_after}")

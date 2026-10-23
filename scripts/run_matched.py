@@ -1,14 +1,17 @@
 """Matched-policy backtest (fpl_rocket.matched): planner policies vs HOLD from one start squad.
 
 Usage: uv run python -I scripts/run_matched.py --seasons 2024-25 2025-26 [2026-27]
-           [--policies aggressive|restrained] [--start baseline_xp|most_owned]
+           [--policies aggressive|restrained] [--restrained-rule free_only|one_per_gw]
+           [--start baseline_xp|most_owned]
            [--fixtures-as-known data/archive/fixtures_as_known] [--pred-cache DIR --workers N]
            [--block 4 --resamples 2000] [--time-limit 60]
 
 --policies aggressive (default): MODEL vs BASELINE planner (<= 2 transfers, hits allowed) vs HOLD.
---policies restrained: MODEL_RESTRAINED vs FORM_RESTRAINED (<= 1 transfer, never a hit) vs HOLD, the rule of
-the prospective trajectories (fpl_rocket.trajectories); with --start most_owned they also start from the
-trajectories' published start rule (the most-owned legal 15 at GW1).
+--policies restrained: MODEL_RESTRAINED vs FORM_RESTRAINED (never a hit) vs HOLD, the rule of the prospective
+trajectories (fpl_rocket.trajectories); with --start most_owned they also start from the trajectories'
+published start rule (the most-owned legal 15 at GW1).
+--restrained-rule free_only (default, step 3h, the trajectories' rule): transfers per GW <= the free transfers
+banked under the rules (cap 5); one_per_gw: <= 1 transfer per GW (step 3g, reproduces that report).
 --fixtures-as-known DIR: the planner sees the schedule as known at each deadline (scripts/
 build_fixtures_as_known.py: <DIR>/<season>/gw<N>.parquet); scoring still uses the actual results.
 --pred-cache DIR: per-season predictions are read from / written to DIR/<season>.pkl (replays that differ
@@ -46,7 +49,13 @@ def load_fixtures_as_known(root: str | Path, season: str) -> dict[int, pd.DataFr
     return out
 
 
-def describe(policies: str, start: str, known: bool) -> str:
+RULE_TEXT = {
+    "free_only": "transfers per GW <= the free transfers available (banked under the rules, cap 5)",
+    "one_per_gw": "<= 1 transfer per GW",
+}
+
+
+def describe(policies: str, start: str, known: bool, rule: str = matched.DEFAULT_RESTRAINED_RULE) -> str:
     start_txt = (
         "the xP-optimal legal 15 under 100.0 by the baseline's GW1 prediction"
         if start == "baseline_xp"
@@ -58,8 +67,8 @@ def describe(policies: str, start: str, known: bool) -> str:
         f"{matched.MAX_TRANSFERS} transfers per GW, hits allowed) on the model / baseline predictions"
         if policies == "aggressive"
         else f"MODEL_RESTRAINED / FORM_RESTRAINED = planner (horizon {matched.HORIZON}, decay "
-        f"{matched.DECAY}, <= 1 transfer per GW, never a hit, free transfers banked under the rules) on "
-        "the model / baseline predictions; hits are zero by construction, so gross = net"
+        f"{matched.DECAY}, restrained rule {rule}: {RULE_TEXT[rule]}, never a hit) on the model / baseline "
+        "predictions; hits are zero by construction, so gross = net"
     )
     fx = (
         "The planner sees the schedule AS KNOWN at each deadline (fixtures-as-known snapshots); points are "
@@ -114,6 +123,12 @@ def main() -> int:
     ap.add_argument("--archive", default=str(ROOT / "data" / "archive" / "all_gws.parquet"))
     ap.add_argument("--out", default=str(ROOT / "data" / "backtests"))
     ap.add_argument("--policies", choices=sorted(matched.POLICY_SETS), default="aggressive")
+    ap.add_argument(
+        "--restrained-rule",
+        choices=sorted(matched.RESTRAINED_RULES),
+        default=matched.DEFAULT_RESTRAINED_RULE,
+        help="restrained policies' transfer rule (default free_only; one_per_gw = the step 3g rule)",
+    )
     ap.add_argument("--start", choices=matched.STARTS, default=None, help="default: baseline_xp")
     ap.add_argument("--fixtures-as-known", default=None, help="folder of <season>/gw<N>.parquet snapshots")
     ap.add_argument("--pred-cache", default=None, help="per-season prediction cache folder")
@@ -151,16 +166,20 @@ def main() -> int:
         fixtures_as_known=known,
         block=args.block,
         resamples=args.resamples,
-        policies=matched.POLICY_SETS[args.policies],
+        policies=(
+            matched.restrained_policies(args.restrained_rule)
+            if args.policies == "restrained"
+            else matched.POLICY_SETS[args.policies]
+        ),
         start=start,
         time_limit=args.time_limit,
     )
     minutes = (time.perf_counter() - t0) / 60
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    tag = args.tag or ("matched" if args.policies == "aggressive" else args.policies) + (
-        "_known" if known else ""
-    )
+    tag = args.tag or (
+        "matched" if args.policies == "aggressive" else f"restrained_{args.restrained_rule}"
+    ) + ("_known" if known else "")
     base = out / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{tag}"
     rows.to_csv(f"{base}.csv", index=False)
     summary.to_csv(f"{base}_summary.csv", index=False)
@@ -169,7 +188,7 @@ def main() -> int:
         [
             f"# Matched-policy backtest: {args.policies} ({datetime.now(UTC):%Y-%m-%d %H:%M} UTC)",
             "",
-            describe(args.policies, start, known is not None),
+            describe(args.policies, start, known is not None, args.restrained_rule),
             "",
             f"Seasons: {', '.join(args.seasons)}. Solver limit {args.time_limit:g} s. "
             f"Runtime {minutes:.1f} min.",

@@ -50,9 +50,14 @@ manager's own, and the planned line-up's points (automatic substitutions, armban
 **Four virtual managers (prospective policy trajectories, from GW9).** The decisive test of the planner: four
 virtual FPL managers start from the SAME squad and play every gameweek without chips, each choice recorded
 before its deadline. *Model, aggressive* (planner objective (c): 3-GW horizon, decay 0.85, up to 2 transfers,
-hits when the objective says so), *Model, restrained* (same xP, at most 1 transfer, never a hit, free
-transfers banked under the rules), *Form, restrained* (the restrained rule on the frozen form-per-90 baseline)
-and *Hold* (never transfers; best XI + captain by the baseline). Start (`trajectories.START_RULE`, favours
+hits when the objective says so), *Model, restrained* (same xP under the restrained rule
+`trajectories.RESTRAINED_RULE`: transfers in a GW <= the free transfers available entering it, banked by the
+rules engine at +1 per GW up to the cap of 5, and never a hit; so it may bank a transfer when nothing is worth
+doing and spend two or more later; no minimum-gain threshold: a free transfer is used whenever the 3-GW
+objective gains anything, a known simplification; no chips, so the post-wildcard carry rule never applies),
+*Form, restrained* (the restrained rule on the frozen form-per-90 baseline) and *Hold* (never transfers; best
+XI + captain by the baseline). Until step 3h the restrained rule was "<= 1 transfer per GW"
+(`run_matched.py --restrained-rule one_per_gw` replays it). Start (`trajectories.START_RULE`, favours
 neither predictor): the most-owned legal 15 under 100.0 at the GW9 deadline prices - players ranked by
 `selected_by_percent` (ties: cheaper, then lower id) and taken greedily while the position has an open slot
 (2/5/5/3), the club has fewer than 3 picks and the money left still pays for the cheapest legal completion;
@@ -228,7 +233,9 @@ uv run python -I scripts/run_matched.py --seasons 2024-25 2025-26 --fixtures-as-
 ```
 
 `run_matched.py` replays planner policies from one start squad (RETROSPECTIVE, matched): `--policies
-aggressive` (MODEL vs BASELINE planner, <= 2 transfers, hits) or `restrained` (the virtual managers' rule);
+aggressive` (MODEL vs BASELINE planner, <= 2 transfers, hits) or `restrained` (the virtual managers' rule;
+`--restrained-rule free_only` (default: transfers <= the free transfers banked, cap 5, never a hit) or
+`one_per_gw` (the step 3g rule, <= 1 transfer per GW, never a hit));
 `--start baseline_xp | most_owned`; `--fixtures-as-known` plans with the schedule as known at each deadline
 (snapshots from the community archive repository's git history, `build_fixtures_as_known.py`, which also
 writes a coverage report); scoring always uses actual results.
