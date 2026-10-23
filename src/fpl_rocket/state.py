@@ -391,8 +391,14 @@ def build_planning_state(
 
 
 # --------------------------------------------------------------------------- fetching (thin, impure)
-def fetch_inputs(client: Any, entry_id: int) -> dict[str, Any]:
-    """Fetch everything build_planning_state needs for one entry (4-6 calls + element-summaries)."""
+def fetch_inputs(
+    client: Any, entry_id: int, round_prices: dict[int, dict[int, int]] | None = None
+) -> dict[str, Any]:
+    """Fetch everything build_planning_state needs for one entry (4-6 calls + initial-squad prices).
+
+    round_prices ({element: {round: value}}, the bundle's round_prices table) supplies the initial-squad
+    prices without API calls; a player absent from it falls back to one live element-summary call.
+    """
     entry = client.entry(entry_id)
     history = client.entry_history(entry_id)
     current = history.get("current", [])
@@ -408,10 +414,10 @@ def fetch_inputs(client: Any, entry_id: int) -> dict[str, Any]:
     initial_values: dict[int, int] = {}
     if picks.get(started):
         # all 15 initial players: their values also validate the budget identity (sum + bank == 1000)
-        for e in (p["element"] for p in picks[started]["picks"]):
-            rows = [r for r in client.element_summary(e)["history"] if int(r["round"]) == started]
-            if rows:
-                initial_values[e] = int(rows[0]["value"])
+        for e in initial_squad_ids(picks, started):
+            value = initial_value(client, e, started, round_prices)
+            if value is not None:
+                initial_values[e] = value
     return {
         "entry": entry,
         "history": history,
@@ -420,3 +426,24 @@ def fetch_inputs(client: Any, entry_id: int) -> dict[str, Any]:
         "bootstrap": bootstrap,
         "initial_values": initial_values,
     }
+
+
+def initial_squad_ids(picks: dict[int, JSON | None], started: int) -> list[int]:
+    first = picks.get(started)
+    return [int(p["element"]) for p in first["picks"]] if first else []
+
+
+def missing_round_prices(ids: list[int], round_prices: dict[int, dict[int, int]] | None) -> list[int]:
+    """Players whose prices must come from a live element-summary call."""
+    return [e for e in ids if round_prices is None or e not in round_prices]
+
+
+def initial_value(
+    client: Any, element: int, rnd: int, round_prices: dict[int, dict[int, int]] | None
+) -> int | None:
+    """Price of `element` in round `rnd`: from round_prices when the player is there, else live."""
+    if round_prices is not None and element in round_prices:
+        value = round_prices[element].get(rnd)
+        return None if value is None else int(value)
+    rows = [r for r in client.element_summary(element)["history"] if int(r["round"]) == rnd]
+    return int(rows[0]["value"]) if rows else None
