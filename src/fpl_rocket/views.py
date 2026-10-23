@@ -641,8 +641,11 @@ def differentials(
     price_range: tuple[float, float] | None = None,
     clubs: list[str] | None = None,
     n_fixtures: int = 5,
+    xp: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Players under an ownership threshold with descriptive columns. Default sort: total points desc."""
+    """Players under an ownership threshold with descriptive columns. Default sort: total points desc.
+    `xp` (xp_next(): element, xp, p_play, low_history) adds the experimental one-GW columns xp_next / p_play
+    as display strings ("insufficient history" for low-history players)."""
     df = players[players["ownership"] < max_ownership]
     if pos:
         df = df[df["pos"] == pos]
@@ -676,4 +679,135 @@ def differentials(
         "cost_change_start",
         "net_transfers_event",
     ]
+    if xp is not None:
+        df = add_xp_columns(df, xp)
+        cols[cols.index("ppg") : cols.index("ppg")] = ["xp_next", "p_play"]
     return df[cols].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------------------------- model (xP)
+INSUFFICIENT = "insufficient history"
+
+
+def xp_label(version: str | None) -> str:
+    return f"xP next GW ({version or 'v?'}, experimental)"
+
+
+def xp_next(xp: pd.DataFrame, next_gw: int | None) -> pd.DataFrame:
+    """One row per element for the first predicted GW >= next_gw: element, gw, xp, p_play, low_history
+    (a missing low_history column = all False). Only ONE-GW values are ever shown publicly."""
+    cols = ["element", "gw", "xp", "p_play", "low_history"]
+    if xp is None or xp.empty:
+        return pd.DataFrame(columns=cols)
+    gws = sorted(int(g) for g in xp["gw"].unique() if next_gw is None or int(g) >= int(next_gw))
+    if not gws:
+        return pd.DataFrame(columns=cols)
+    x = xp[xp["gw"] == gws[0]].copy()
+    if "low_history" not in x:
+        x["low_history"] = False
+    x["low_history"] = x["low_history"].fillna(False).astype(bool)
+    if "p_play" not in x:
+        x["p_play"] = float("nan")
+    return x[cols].drop_duplicates("element").reset_index(drop=True)
+
+
+def fmt_xp(value: Any, low_history: bool) -> str:
+    if low_history:
+        return INSUFFICIENT
+    v = _f(value, float("nan"))
+    return "-" if v != v else f"{v:.2f}"
+
+
+def fmt_p_play(value: Any, low_history: bool) -> str:
+    if low_history:
+        return INSUFFICIENT
+    v = _f(value, float("nan"))
+    return "-" if v != v else f"{100 * v:.0f}%"
+
+
+def add_xp_columns(df: pd.DataFrame, xpn: pd.DataFrame, id_col: str = "id") -> pd.DataFrame:
+    """df + xp_next / p_play display strings by player id ("-" when the model has no row)."""
+    idx = xpn.set_index("element")
+    out = df.copy()
+    low = out[id_col].map(idx["low_history"]).fillna(False).astype(bool)
+    out["xp_next"] = [fmt_xp(v, lo) for v, lo in zip(out[id_col].map(idx["xp"]), low, strict=True)]
+    out["p_play"] = [fmt_p_play(v, lo) for v, lo in zip(out[id_col].map(idx["p_play"]), low, strict=True)]
+    return out
+
+
+def compare_xp_rows(
+    players: pd.DataFrame, ids: list[int], xpn: pd.DataFrame, version: str | None
+) -> pd.DataFrame:
+    """Two extra rows for the Compare table: one-GW xP and P(play), columns = the selected players."""
+    idx = players.set_index("id")
+    sub = add_xp_columns(pd.DataFrame({"id": ids}), xpn)
+    data = {
+        f"{idx.at[pid, 'name']} ({idx.at[pid, 'team']})": [x, p]
+        for pid, x, p in zip(ids, sub["xp_next"], sub["p_play"], strict=True)
+    }
+    return pd.DataFrame(data, index=[xp_label(version), "P(play)"])
+
+
+# --------------------------------------------------------------------------------------------- planner
+def plan_pitch(
+    gp: Any, players: pd.DataFrame, xp: dict[tuple[int, int], float], low_history: frozenset[int] | set[int]
+) -> JSON:
+    """ui.pitch_html rows for one GW of a plan: XI by position (C / VC badges), bench in order (badges 1-4),
+    points = one-GW xP ("insufficient history" for low-history players)."""
+    idx = players.set_index("id")
+    out: JSON = {k: [] for k in (*PITCH_ROWS, "Bench")}
+
+    def card(e: int, badge: str) -> JSON:
+        known = e in idx.index
+        return {
+            "name": idx.at[e, "name"] if known else str(e),
+            "team": idx.at[e, "team"] if known else "?",
+            "price": float(idx.at[e, "price"]) if known else None,
+            "points": fmt_xp(xp.get((e, gp.gw), 0.0), e in low_history),
+            "badge": badge,
+            "pos": idx.at[e, "pos"] if known else "?",
+        }
+
+    for e in gp.xi:
+        c = card(e, "C" if e == gp.captain else "VC" if e == gp.vice else "")
+        out[c["pos"]].append(c)
+    for i, e in enumerate(gp.bench):
+        out["Bench"].append(card(e, str(i + 1)))
+    return out
+
+
+def plan_gw_frame(plan: Any, names: dict[int, str]) -> pd.DataFrame:
+    """One row per GW of a plan: transfers, captain, hits, chip, expected points."""
+    rows = []
+    for gp in plan.gws:
+        rows.append(
+            {
+                "gw": gp.gw,
+                "out": ", ".join(names.get(e, str(e)) for e in gp.transfers_out) or "-",
+                "in": ", ".join(names.get(e, str(e)) for e in gp.transfers_in) or "-",
+                "free_transfers": gp.free_transfers,
+                "hits": gp.hits,
+                "captain": names.get(gp.captain, str(gp.captain)),
+                "chip": CHIP_LABELS.get(gp.chip or "", ""),
+                "bank_after": gp.bank_after / 10,
+                "expected_points": round(gp.expected_points, 1),
+            }
+        )
+    cols = ["gw", "out", "in", "free_transfers", "hits", "captain", "chip", "bank_after", "expected_points"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def chip_frame(scenarios: list[Any]) -> pd.DataFrame:
+    rows = [
+        {
+            "chip": CHIP_LABELS.get(sc.chip, sc.chip),
+            "window": sc.window,
+            "evaluated": sc.evaluated,
+            "played_in": f"GW{sc.gw}" if sc.gw else "-",
+            "gain": round(sc.gain, 1) if sc.status == "solved" else None,
+            "status": sc.status,
+            "note": sc.reason,
+        }
+        for sc in scenarios
+    ]
+    return pd.DataFrame(rows, columns=["chip", "window", "evaluated", "played_in", "gain", "status", "note"])

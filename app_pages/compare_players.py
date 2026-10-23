@@ -31,8 +31,17 @@ if players is not None:
     else:
         st.subheader("Season metrics")
         with ui.guard("Metric table"):
-            st.dataframe(views.compare_table(players, ids))
+            table = views.compare_table(players, ids)
+            model = data.model_status()
+            if model.get("available"):
+                xpn = views.xp_next(data.xp_table(), views.next_gw(boot))
+                table = pd.concat([table, views.compare_xp_rows(players, ids, xpn, model.get("version"))])
+            st.dataframe(table)
             st.caption("Ownership = selected_by_percent. Defensive contribution is the raw season count.")
+            if model.get("available"):
+                st.caption(ui.XP_HELP.format(version=model.get("model_version") or ""))
+            else:
+                st.caption(f"xP rows unavailable: {model.get('reason') or 'no model bundle'}.")
 
         st.subheader("Points per gameweek")
         with ui.guard("Per-GW points"):
