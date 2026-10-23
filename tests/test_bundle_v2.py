@@ -114,11 +114,12 @@ def test_too_many_missing_summaries_fail_the_build(tmp_path):
 
 # ------------------------------------------------------------------------------------------ manifest flags
 @pytest.mark.parametrize(
-    "hours_left, expected", [(4.0, False), (2.9, True), (0.5, True), (-0.1, False), (3.0, False)]
+    "minutes_left, expected",
+    [(180, False), (91, False), (90, True), (60, True), (31, True), (30, False), (10, False), (-5, False)],
 )
-def test_pre_deadline_flag(hours_left, expected):
+def test_pre_deadline_flag_is_the_30_to_90_minute_window(minutes_left, expected):
     now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
-    deadline = now + timedelta(hours=hours_left)
+    deadline = now + timedelta(minutes=minutes_left)
     events = [
         {"id": 8, "is_next": False, "deadline_time": "2026-10-17T17:30:00Z"},
         {"id": 9, "is_next": True, "deadline_time": deadline.isoformat().replace("+00:00", "Z")},
@@ -141,7 +142,7 @@ def test_manifest_flags_from_snapshot(tmp_path):
     assert early["pre_deadline"] is False and late["pre_deadline"] is True
     assert early["next_event"] == late["next_event"] == nxt["id"]
     assert late["next_deadline_time"] == deadline.isoformat(timespec="seconds")
-    assert late["cron_interval_hours"] == 3
+    assert late["cron_interval_hours"] == 1 and late["pre_deadline_window_minutes"] == [30, 90]
 
 
 # ------------------------------------------------------------------------------------------ app payload

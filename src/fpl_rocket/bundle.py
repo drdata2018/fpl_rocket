@@ -20,9 +20,19 @@ players / teams / events / bootstrap_misc / fixtures are written LOSSLESSLY from
 array per key, nulls kept, nested values JSON-encoded and listed under `json_columns` in the manifest), so
 records_from_parquet() gives back the API's own values; the app rebuilds bootstrap-static from them.
 
-The manifest also carries next_event / next_deadline_time and `pre_deadline`: True when this run is the
-last scheduled one before the next deadline (deadline - now < CRON_INTERVAL_H). The publishing workflow
-(.github/workflows/bundle.yml) tags such a bundle `deadline-gw<N>` and keeps it permanently.
+The manifest also carries next_event / next_deadline_time and `pre_deadline`: True when the bundle is created
+30-90 minutes before the next deadline (PRE_DEADLINE_WINDOW_MIN). The hourly publishing workflow
+(.github/workflows/bundle.yml) tags such a bundle `deadline-gw<N>` and keeps it permanently; if GitHub's cron
+delay leaves no bundle in that window, the week is recorded as missing.
+
+Polite API load (hourly runs): element summaries (one call per player) are refetched only when the previous
+release's element_history is older than 6 h, a GW has finished since it was fetched, or there is no previous
+release; otherwise element_history is reused from the previous release and round_prices is rebuilt from it
+plus the bootstrap now_cost. The manifest records element_history_source = "fetched" | "reused:<bundle_id>"
+(the bundle that fetched it), element_history_fetched_at and element_history_reason.
+
+Optional model tables (scripts/build_bundle.py --with-model; fpl_rocket.model): xp, xp_sims, xp_fixtures, with
+model_version / model_fitted_on / model_features in the manifest. The app does not read them yet.
 """
 
 from __future__ import annotations
@@ -44,6 +54,7 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import requests
 
 from .api import FPLAPIError, FPLClient
 from .config import FETCH_WORKERS
@@ -52,7 +63,14 @@ from .rules import get_rules
 MANIFEST = "manifest.json"
 PARTIAL_SUFFIX = ".partial"
 FORMAT_VERSION = 2
-CRON_INTERVAL_H = 3  # .github/workflows/bundle.yml runs every 3 hours
+CRON_INTERVAL_H = 1  # .github/workflows/bundle.yml runs hourly (at :40)
+# pre_deadline = the bundle created 30-90 minutes before the next deadline (published as deadline-gw<N>)
+PRE_DEADLINE_WINDOW_MIN = (30, 90)
+# element summaries (668 calls) are refetched only when the previous release's copy is older than this,
+# a GW has finished since, or there is no previous release (element_history_decision)
+ELEMENT_HISTORY_MAX_AGE_H = 6.0
+# the joint simulation sample is large and highly repetitive: zstd keeps it small
+PARQUET_COMPRESSION = {"xp_sims": "zstd"}
 JSON_COLS_KEY = b"fpl_rocket.json_columns"
 # tables the app needs (data.py downloads only these); element_history / gw_live_explain are for models
 APP_TABLES = ("players", "teams", "events", "bootstrap_misc", "fixtures", "gw_live", "round_prices")
@@ -309,6 +327,80 @@ def _clone_factory(client: FPLClient) -> Callable[[], FPLClient]:
     return make
 
 
+# ============================================================================== previous release
+@dataclass
+class PreviousRelease:
+    """The latest published bundle: its manifest and element_history (checksum-verified)."""
+
+    manifest: JSON
+    element_history: pd.DataFrame
+
+
+def _read_release_file(source: str, name: str, bundle_id: str | None = None) -> bytes:
+    """manifest.json of the latest release (bundle_id None) or one asset of release bundle-<bundle_id>;
+    `source` is the releases base URL or a local bundle directory (tests, offline runs)."""
+    if not source.startswith(("https://", "http://")):
+        return (Path(source) / name).read_bytes()
+    tag = "latest/download" if bundle_id is None else f"download/bundle-{bundle_id}"
+    resp = requests.get(
+        f"{source.rstrip('/')}/{tag}/{name}", timeout=(5.0, 60.0), headers={"User-Agent": "fpl-rocket-bundle"}
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
+def fetch_previous_release(source: str | None) -> tuple[PreviousRelease | None, str]:
+    """(previous release, note). None when there is none or it is unusable (the note says why)."""
+    if not source:
+        return None, "no previous release source"
+    try:
+        manifest = json.loads(_read_release_file(source, MANIFEST))
+        name = "element_history.parquet"
+        data = _read_release_file(source, name, str(manifest["bundle_id"]))
+        verified_file(manifest, name, data)
+        return PreviousRelease(manifest, pd.read_parquet(io.BytesIO(data))), "ok"
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else None
+        return None, "no previous release" if code == 404 else f"previous release unreadable (HTTP {code})"
+    except Exception as exc:  # noqa: BLE001 - any failure means: fetch fresh
+        return None, f"previous release unusable: {exc!r}"
+
+
+def element_history_origin(manifest: JSON) -> tuple[str, str | None, list[int] | None]:
+    """(origin bundle id, fetched_at, finished GWs at fetch) of a manifest's element_history. Manifests
+    written before the reuse rule existed fetched it themselves (snapshot times in source_snapshots)."""
+    src = str(manifest.get("element_history_source") or "fetched")
+    origin = src.split(":", 1)[1] if src.startswith("reused:") else str(manifest.get("bundle_id"))
+    snaps = manifest.get("source_snapshots") or {}
+    fetched_at = manifest.get("element_history_fetched_at") or snaps.get("element_summary")
+    finished = manifest.get("element_history_finished_gws")
+    if finished is None and "finished_gws" in snaps:
+        finished = [int(g) for g in str(snaps["finished_gws"]).split(",") if g.strip()]
+    return origin, fetched_at, finished
+
+
+def element_history_decision(
+    previous: JSON | None,
+    finished_now: list[int],
+    now: datetime,
+    max_age_h: float = ELEMENT_HISTORY_MAX_AGE_H,
+) -> tuple[bool, str]:
+    """(refetch?, reason). The 668 element-summary calls are made only when (a) there is no previous release,
+    (b) its element_history is older than max_age_h, or (c) a GW has finished since it was fetched;
+    otherwise the previous release's element_history is reused (prices patched from bootstrap now_cost)."""
+    if previous is None:
+        return True, "no previous release"
+    _, fetched_at, finished = element_history_origin(previous)
+    if not fetched_at or finished is None:
+        return True, "previous manifest lacks element_history provenance"
+    age = now - datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+    if age > timedelta(hours=max_age_h):
+        return True, f"previous element_history is {age.total_seconds() / 3600:.1f} h old (> {max_age_h:g} h)"
+    if sorted(int(g) for g in finished) != sorted(int(g) for g in finished_now):
+        return True, "a gameweek has finished since the previous element_history was fetched"
+    return False, f"reused: {age.total_seconds() / 3600:.1f} h old, no gameweek finished since"
+
+
 # ============================================================================== build
 @dataclass
 class BuildResult:
@@ -317,17 +409,18 @@ class BuildResult:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def deadline_info(events: list[JSON], now: datetime, interval_h: float = CRON_INTERVAL_H) -> JSON:
-    """next_event, next_deadline_time and pre_deadline (0 < deadline - now < interval)."""
+def deadline_info(events: list[JSON], now: datetime) -> JSON:
+    """next_event, next_deadline_time and pre_deadline: deadline - now in (30 min, 90 min]."""
     nxt = next((e for e in events if e.get("is_next")), None)
     if nxt is None:
         return {"next_event": None, "next_deadline_time": None, "pre_deadline": False}
     deadline = datetime.fromisoformat(str(nxt["deadline_time"]).replace("Z", "+00:00"))
     left = deadline - now
+    lo, hi = PRE_DEADLINE_WINDOW_MIN
     return {
         "next_event": int(nxt["id"]),
         "next_deadline_time": deadline.isoformat(timespec="seconds"),
-        "pre_deadline": timedelta(0) < left < timedelta(hours=interval_h),
+        "pre_deadline": timedelta(minutes=lo) < left <= timedelta(minutes=hi),
     }
 
 
@@ -339,11 +432,13 @@ def build_tables(
     client_factory: Callable[[], FPLClient] | None = None,
     max_missing_frac: float = 0.02,
     min_interval: float = 0.08,
+    previous: PreviousRelease | None = None,
 ) -> BuildResult:
     """Fetch the shared data and return the tables, source snapshot times and manifest extras.
 
     element_ids limits the element-summary fan-out (tests); default = every player in bootstrap. Raises
-    BundleError when more than max_missing_frac of the summaries cannot be fetched.
+    BundleError when more than max_missing_frac of the summaries cannot be fetched. `previous` (the latest
+    published release) lets element_history be reused under element_history_decision().
     """
     snaps: dict[str, str] = {}
     t0 = time.monotonic()
@@ -356,14 +451,38 @@ def build_tables(
     snaps["event_live"] = now().isoformat(timespec="seconds")
     gw_live, explain = live_tables(lives)
 
-    ids = element_ids if element_ids is not None else [int(p["id"]) for p in bootstrap["elements"]]
-    summaries, missing = fetch_element_summaries(
-        client_factory or _clone_factory(client), ids, min_interval=min_interval
-    )
-    snaps["element_summary"] = now().isoformat(timespec="seconds")
-    if ids and len(missing) > max_missing_frac * len(ids):
-        raise BundleError(f"{len(missing)} of {len(ids)} element summaries failed: {missing[:20]}")
-    history = element_history_frame(summaries)
+    refetch, reason = element_history_decision(previous.manifest if previous else None, finished, now())
+    if refetch:
+        ids = element_ids if element_ids is not None else [int(p["id"]) for p in bootstrap["elements"]]
+        summaries, missing = fetch_element_summaries(
+            client_factory or _clone_factory(client), ids, min_interval=min_interval
+        )
+        snaps["element_summary"] = now().isoformat(timespec="seconds")
+        if ids and len(missing) > max_missing_frac * len(ids):
+            raise BundleError(f"{len(missing)} of {len(ids)} element summaries failed: {missing[:20]}")
+        history = element_history_frame(summaries)
+        provenance = {
+            "element_history_source": "fetched",
+            "element_history_fetched_at": snaps["element_summary"],
+            "element_history_finished_gws": finished,
+            "element_history_reason": reason,
+            "element_summary_missing": missing,
+            "element_summary_requested": len(ids),
+        }
+    else:
+        assert previous is not None
+        origin, fetched_at, _ = element_history_origin(previous.manifest)
+        history = previous.element_history
+        snaps["element_summary"] = str(fetched_at)
+        provenance = {
+            "element_history_source": f"reused:{origin}",
+            "element_history_fetched_at": fetched_at,
+            "element_history_finished_gws": finished,
+            "element_history_reason": reason,
+            "element_history_previous_bundle": previous.manifest.get("bundle_id"),
+            "element_summary_missing": previous.manifest.get("element_summary_missing", []),
+            "element_summary_requested": 0,
+        }
 
     misc = [
         {"key": k, "json": json.dumps(v, ensure_ascii=False)}
@@ -379,14 +498,11 @@ def build_tables(
         "gw_live": gw_live,
         "gw_live_explain": explain,
         "element_history": history,
+        # history prices + the upcoming round from bootstrap now_cost (fresh even when history is reused)
         "round_prices": round_prices_frame(history, bootstrap),
     }
     snaps["finished_gws"] = ",".join(map(str, finished))
-    extra = {
-        "element_summary_missing": missing,
-        "element_summary_requested": len(ids),
-        "fetch_seconds": round(time.monotonic() - t0, 1),
-    }
+    extra = {**provenance, "fetch_seconds": round(time.monotonic() - t0, 1)}
     return BuildResult(tables, snaps, extra)
 
 
@@ -419,7 +535,7 @@ def write_tables(
             pq.write_table(t, path)
             jcols = json_columns(t)
         else:
-            t.to_parquet(path, index=False)
+            t.to_parquet(path, index=False, compression=PARQUET_COMPRESSION.get(name, "snappy"))
             jcols = []
         files.append(
             {
@@ -442,9 +558,12 @@ def write_tables(
         "files": files,
         **(extra or {}),
     }
-    (tmp / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (tmp / MANIFEST).write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     os.replace(tmp, final)
     return final
+
+
+ModelFn = Callable[[dict[str, Table]], tuple[dict[str, Table], dict[str, Any]]]
 
 
 def write_bundle(
@@ -452,15 +571,34 @@ def write_bundle(
     client: FPLClient | None = None,
     *,
     now: Callable[[], datetime] = _utc_now,
+    previous: PreviousRelease | None = None,
+    model: ModelFn | None = None,
     **build_kw: Any,
 ) -> Path:
-    """Pull the shared data (bootstrap, fixtures, finished GWs' live data, every element summary) and write
-    one immutable bundle whose manifest carries the deadline flags."""
-    result = build_tables(client or FPLClient(), now, **build_kw)
+    """Pull the shared data (bootstrap, fixtures, finished GWs' live data, element summaries unless reused
+    from `previous`) and write one immutable bundle whose manifest carries the deadline flags.
+
+    `model(tables) -> (extra tables, manifest fields)` adds the xP tables (scripts/build_bundle.py
+    --with-model); a model failure is recorded as model_error and the data bundle is still written."""
+    result = build_tables(client or FPLClient(), now, previous=previous, **build_kw)
+    tables = dict(result.tables)
+    model_extra: dict[str, Any] = {}
+    if model is not None:
+        try:
+            extra_tables, model_extra = model(tables)
+            tables.update(extra_tables)
+        except Exception as exc:  # noqa: BLE001 - shared data must still publish; the failure is recorded
+            model_extra = {"model_version": None, "model_error": f"{type(exc).__name__}: {exc}"}
     created = now()
     events = table_records(result.tables["events"]) if isinstance(result.tables["events"], pa.Table) else []
-    extra = {**result.extra, **deadline_info(events, created), "cron_interval_hours": CRON_INTERVAL_H}
-    return write_tables(result.tables, out_dir, result.snapshots, extra=extra, created=created)
+    extra = {
+        **result.extra,
+        **model_extra,
+        **deadline_info(events, created),
+        "pre_deadline_window_minutes": list(PRE_DEADLINE_WINDOW_MIN),
+        "cron_interval_hours": CRON_INTERVAL_H,
+    }
+    return write_tables(tables, out_dir, result.snapshots, extra=extra, created=created)
 
 
 # ============================================================================== read

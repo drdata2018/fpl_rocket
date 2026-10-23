@@ -18,11 +18,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Sync environment (Python from .python-version)
+      - name: Sync environment (Python from .python-version; default groups dev + model)
         run: uv sync --locked
 
       - name: Ruff
-        run: uv run ruff check
+        run: |
+          uv run ruff check
+          uv run ruff format --check
 
       - name: Pytest
         run: uv run pytest -q
