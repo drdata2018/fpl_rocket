@@ -25,9 +25,10 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # runnable without installing
 
 from fpl_rocket.api import BASE_URL, BROWSER_UA  # noqa: E402
+from fpl_rocket.config import PLACEHOLDER_TEAM_ID  # noqa: E402
 
-# The probe entry is the owner's public team id (plan section 0: allowed as the probe/placeholder constant).
-PROBE_ENTRY = 7630179
+# The probe entry is the placeholder team id from fpl_rocket.config (plan section 0: the one allowed place).
+PROBE_ENTRY = int(PLACEHOLDER_TEAM_ID)
 PROBE_PATHS = (
     "bootstrap-static/",
     "fixtures/?event=8",
