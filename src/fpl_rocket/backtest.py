@@ -5,8 +5,9 @@ match what was known at the deadline. Every number produced here is labelled acc
 
 * rolling_origin(): for each (season, target_gw) the train rows are every GW strictly before target_gw in that
   season plus the whole previous season when it is in the frame; the target rows are the target GW.
-* Predictor: fit(train) -> predict(target_players, target_gw) -> expected points per player for that GW
-  (target_players carries no outcome columns).
+* Predictor: fit(train) -> predict(target_players, target_gw, fixtures) -> expected points per player for
+  that GW (target_players and fixtures = Fold.target_fixtures() carry no outcome columns). A predictor may
+  expose `last_details` ({name: DataFrame}) after predict; run_backtest collects them per fold.
 * FormPer90Baseline ("form per 90 x availability"), per player keyed by the cross-season `code`:
       p90   = points / minutes * 90 over the player's last 5 GWs with minutes > 0 (ratio of sums)
       avail = minutes / (90 * fixtures) over the player's last 5 GWs (any minutes)
@@ -27,8 +28,8 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -63,6 +64,21 @@ OUTCOME_COLUMNS = (
     "recoveries",
     "tackles",
 )
+TARGET_FIXTURE_COLUMNS = (
+    "season",
+    "gw",
+    "element",
+    "code",
+    "element_type",
+    "team",
+    "team_id",
+    "opponent",
+    "opponent_id",
+    "was_home",
+    "fixture",
+    "kickoff_time",
+    "value",
+)
 PLAYER_TYPES = (1, 2, 3, 4)
 FORMATION_MIN = {1: 1, 2: 3, 3: 2, 4: 1}
 FORMATION_MAX = {1: 1, 2: 5, 3: 5, 4: 3}
@@ -89,6 +105,12 @@ class Fold:
         )
         return g
 
+    def target_fixtures(self) -> pd.DataFrame:
+        """One row per (player, fixture) of the target GW WITHOUT outcome columns: who plays whom, where and
+        when (known before the deadline)."""
+        keep = [c for c in TARGET_FIXTURE_COLUMNS if c in self.target]
+        return self.target[keep].reset_index(drop=True)
+
     def actuals(self) -> pd.Series:
         """Actual GW points per element (double GWs summed), aligned with target_players()."""
         pts = self.target.groupby("element", sort=True)["total_points"].sum()
@@ -100,7 +122,9 @@ class Predictor(Protocol):
 
     def fit(self, train: pd.DataFrame) -> None: ...
 
-    def predict(self, target_players: pd.DataFrame, target_gw: int) -> pd.Series:
+    def predict(
+        self, target_players: pd.DataFrame, target_gw: int, fixtures: pd.DataFrame | None = None
+    ) -> pd.Series:
         """Expected points per player for target_gw, index aligned with target_players."""
         ...
 
@@ -170,13 +194,22 @@ class FormPer90Baseline:
         xp = (p90.reindex(avail.index).fillna(0.0) * avail).where(recent.reindex(avail.index) > 0, 0.0)
         self.xp_per_fixture = xp.fillna(0.0)
 
-    def predict(self, target_players: pd.DataFrame, target_gw: int) -> pd.Series:
+    def predict(
+        self, target_players: pd.DataFrame, target_gw: int, fixtures: pd.DataFrame | None = None
+    ) -> pd.Series:
         key = target_players["code"].fillna(-target_players["element"]).astype("int64")
         per_fixture = key.map(self.xp_per_fixture).fillna(0.0).astype(float)
         return (per_fixture * target_players["n_fixtures"].astype(float)).rename("xp")
 
 
-PREDICTORS: dict[str, type] = {"baseline": FormPer90Baseline}
+def _model_predictor():
+    """The Phase B xP model (fpl_rocket.model; needs the `model` dependency group)."""
+    from .model.pipeline import ModelPredictor
+
+    return ModelPredictor()
+
+
+PREDICTORS: dict[str, Callable[[], Predictor]] = {"baseline": FormPer90Baseline, "model": _model_predictor}
 
 
 # ============================================================================================ metrics
@@ -278,6 +311,7 @@ class BacktestResult:
     folds: pd.DataFrame  # one row per (season, gw)
     calibration: pd.DataFrame  # per season and pooled, by decile
     predictions: pd.DataFrame  # per (season, gw, element): pred, actual
+    details: dict[str, pd.DataFrame] = field(default_factory=dict)  # predictor.last_details, all folds
 
 
 def run_backtest(
@@ -289,18 +323,24 @@ def run_backtest(
     """Run every fold; gw_averages = {(season, gw): official average entry score} where known."""
     gw_averages = gw_averages or {}
     fold_rows, preds = [], []
+    details: dict[str, list[pd.DataFrame]] = {}
     for fold in rolling_origin(df, seasons):
         tp = fold.target_players()
         tp = tp[tp["element_type"].isin(PLAYER_TYPES)].reset_index(drop=True)
         if tp.empty:
             continue
         predictor.fit(fold.train)
-        pred = predictor.predict(tp, fold.target_gw).reset_index(drop=True)
+        pred = predictor.predict(tp, fold.target_gw, fixtures=fold.target_fixtures()).reset_index(drop=True)
+        for name, detail in (getattr(predictor, "last_details", None) or {}).items():
+            details.setdefault(name, []).append(detail)
         actual = tp["element"].map(fold.actuals()).fillna(0.0).astype(float)
         m = point_metrics(pred, actual)
-        played = (tp["element"].map(fold.target.groupby("element")["minutes"].sum()).fillna(0) > 0).to_numpy()
+        minutes = tp["element"].map(fold.target.groupby("element")["minutes"].sum()).fillna(0).astype(float)
+        played = (minutes > 0).to_numpy()
         m["spearman_played"] = spearman(pred[played], actual[played])  # without the 0-minute mass
-        frame = tp.assign(pred=pred.to_numpy(float), actual=actual.to_numpy(float))
+        frame = tp.assign(
+            pred=pred.to_numpy(float), actual=actual.to_numpy(float), minutes=minutes.to_numpy()
+        )
         xi, cap = xi_points(frame)
         official = gw_averages.get((fold.season, fold.target_gw))
         avg = official if official is not None else gw_average_proxy(fold.target)
@@ -317,7 +357,7 @@ def run_backtest(
                 "train_rows": len(fold.train),
             }
         )
-        preds.append(frame[["season", "gw", "element", "element_type", "pred", "actual"]])
+        preds.append(frame[["season", "gw", "element", "element_type", "pred", "actual", "minutes"]])
     folds = pd.DataFrame(fold_rows)
     predictions = pd.concat(preds, ignore_index=True) if preds else pd.DataFrame()
     calib = []
@@ -326,7 +366,29 @@ def run_backtest(
             calib.append(calibration_table(g["pred"], g["actual"]).assign(season=season))
         calib.append(calibration_table(predictions["pred"], predictions["actual"]).assign(season="all"))
     calibration = pd.concat(calib, ignore_index=True) if calib else pd.DataFrame()
-    return BacktestResult(folds, calibration, predictions)
+    merged = {k: pd.concat(v, ignore_index=True) for k, v in details.items()}
+    return BacktestResult(folds, calibration, predictions, merged)
+
+
+def summarise_by_position(result: BacktestResult) -> pd.DataFrame:
+    """Per season and element_type: pooled RMSE / MAE and mean within-GW Spearman (all and played-only
+    needs minutes, so only `all` here)."""
+    p = result.predictions
+    rows = []
+    for (season, et), g in p.groupby(["season", "element_type"]):
+        err = g["pred"] - g["actual"]
+        sp = [spearman(x["pred"], x["actual"]) for _, x in g.groupby("gw")]
+        rows.append(
+            {
+                "season": season,
+                "element_type": int(et),
+                "player_gws": len(g),
+                "rmse": float(np.sqrt((err**2).mean())),
+                "mae": float(err.abs().mean()),
+                "spearman_mean": float(np.nanmean(sp)) if sp else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def summarise(result: BacktestResult) -> pd.DataFrame:

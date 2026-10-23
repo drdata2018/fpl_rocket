@@ -1,15 +1,21 @@
-# Shared-data bundle (docs/PLAN_v2.md section 2): every 3 hours (offset from the spike probe at :17) and on
+# Shared-data bundle (docs/PLAN_v2.md section 2): HOURLY at :40 (offset from the spike probe at :17) and on
 # demand (Actions -> bundle -> Run workflow). Builds one immutable bundle and publishes it as a GitHub Release:
 #   bundle-<bundle_id>     every run, marked "latest" (the app reads releases/latest/download/manifest.json)
-#   deadline-gw<N>         also, when the manifest says pre_deadline (last scheduled run before GW N's
-#                          deadline); kept permanently = the scored snapshot for the prospective registry
+#   deadline-gw<N>         also, when the manifest says pre_deadline (bundle created 30-90 minutes before GW N's
+#                          deadline); kept permanently = the scored snapshot for the prospective registry. If the
+#                          GitHub cron delay leaves no bundle in that window, the week is recorded as missing.
+# API load stays polite: the 668 element-summary calls are made only when the previous release's
+# element_history is older than 6 h, a GW has finished since, or there is no previous release; otherwise it is
+# reused (manifest: element_history_source = fetched | reused:<bundle_id>).
+# The xP model (fpl_rocket.model, dependency group "model") is fitted here on the archived previous season
+# (cached) + the current season from the bundle; the app does not read xp yet.
 # Releases are created as drafts, filled with every asset, then published, so readers never see a release
-# without its files. Retention: bundle-* releases and tags older than 7 days are deleted; deadline-* never.
+# without its files. Retention: bundle-* releases and tags older than 48 hours are deleted; deadline-* never.
 name: bundle
 
 on:
   schedule:
-    - cron: "40 */3 * * *"
+    - cron: "40 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,7 +28,7 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -30,12 +36,28 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Sync environment (runtime dependencies only)
-        run: uv sync --locked --no-dev
+      - name: Sync environment (runtime + model dependencies, no dev tools)
+        run: uv sync --locked --no-dev --group model
 
-      - name: Build bundle
+      - name: Previous season label (from the rules' CURRENT_SEASON)
+        run: |
+          prev=$(uv run --no-sync python -c "from fpl_rocket.model.team_goals import previous_season; from fpl_rocket.rules import CURRENT_SEASON; print(previous_season(CURRENT_SEASON))")
+          echo "PREVIOUS_SEASON=$prev" >> "$GITHUB_ENV"
+
+      - name: Restore the archived previous season (model training data)
+        id: archive
+        uses: actions/cache@v4
+        with:
+          path: data/archive
+          key: archive-${{ env.PREVIOUS_SEASON }}-${{ hashFiles('src/fpl_rocket/archive.py') }}
+
+      - name: Download the previous season archive (cache miss only)
+        if: steps.archive.outputs.cache-hit != 'true'
+        run: uv run --no-sync python -I scripts/load_archive.py --seasons "$PREVIOUS_SEASON"
+
+      - name: Build bundle (with the xP model)
         id: build
-        run: uv run --no-dev python scripts/build_bundle.py --out data/bundles
+        run: uv run --no-sync python scripts/build_bundle.py --out data/bundles --with-model --archive data/archive/all_gws.parquet
 
       - name: Publish release bundle-<id> (draft -> upload -> publish as latest)
         env:
@@ -43,15 +65,16 @@ jobs:
           BUNDLE_ID: ${{ steps.build.outputs.bundle_id }}
           NEXT_EVENT: ${{ steps.build.outputs.next_event }}
           PRE_DEADLINE: ${{ steps.build.outputs.pre_deadline }}
+          MODEL_VERSION: ${{ steps.build.outputs.model_version }}
         run: |
           set -euo pipefail
           assets=("$DIR"/*.parquet "$DIR/manifest.json")
           tag="bundle-$BUNDLE_ID"
-          notes="Shared-data bundle $BUNDLE_ID (next GW${NEXT_EVENT:-none}, pre_deadline=$PRE_DEADLINE). See manifest.json for checksums."
+          notes="Shared-data bundle $BUNDLE_ID (next GW${NEXT_EVENT:-none}, pre_deadline=$PRE_DEADLINE, model ${MODEL_VERSION:-none}). See manifest.json for checksums."
           gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" --title "Bundle $BUNDLE_ID" --notes "$notes"
           gh release edit "$tag" --draft=false --latest
 
-      - name: Publish release deadline-gw<N> (pre-deadline run only; replaces an earlier one for the same GW)
+      - name: Publish release deadline-gw<N> (pre-deadline bundle only; replaces an earlier one for the same GW)
         if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
         env:
           DIR: ${{ steps.build.outputs.path }}
@@ -66,13 +89,13 @@ jobs:
           fi
           gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" \
             --title "Deadline GW$NEXT_EVENT (bundle $BUNDLE_ID)" \
-            --notes "Last bundle published before the GW$NEXT_EVENT deadline: the scored snapshot. Never pruned."
+            --notes "Bundle created 30-90 minutes before the GW$NEXT_EVENT deadline: the scored snapshot. Never pruned."
           gh release edit "$tag" --draft=false --latest=false
 
-      - name: Retention (delete bundle-* releases and tags older than 7 days; never deadline-*)
+      - name: Retention (delete bundle-* releases and tags older than 48 hours; never deadline-*)
         run: |
           set -euo pipefail
-          cutoff=$(date -u -d '7 days ago' +%Y%m%dT%H%M%SZ)
+          cutoff=$(date -u -d '48 hours ago' +%Y%m%dT%H%M%SZ)
           echo "pruning bundle-* older than $cutoff"
           gh release list --limit 1000 --json tagName --jq '.[].tagName' \
             | { grep -E '^bundle-[0-9]{8}T[0-9]{6}Z$' || true; } \

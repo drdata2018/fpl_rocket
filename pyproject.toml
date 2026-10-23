@@ -16,6 +16,15 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+# model fitting (GitHub Actions bundle job, backtests, tests); NOT in requirements.txt: the app only reads parquet
+model = [
+    "numpy>=2.0",
+    "scikit-learn>=1.5",
+    "scipy>=1.13",
+]
+
+[tool.uv]
+default-groups = ["dev", "model"]
 
 [build-system]
 requires = ["hatchling"]
