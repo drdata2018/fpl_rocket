@@ -1,0 +1,92 @@
+# Shared-data bundle (docs/PLAN_v2.md section 2): every 3 hours (offset from the spike probe at :17) and on
+# demand (Actions -> bundle -> Run workflow). Builds one immutable bundle and publishes it as a GitHub Release:
+#   bundle-<bundle_id>     every run, marked "latest" (the app reads releases/latest/download/manifest.json)
+#   deadline-gw<N>         also, when the manifest says pre_deadline (last scheduled run before GW N's
+#                          deadline); kept permanently = the scored snapshot for the prospective registry
+# Releases are created as drafts, filled with every asset, then published, so readers never see a release
+# without its files. Retention: bundle-* releases and tags older than 7 days are deleted; deadline-* never.
+name: bundle
+
+on:
+  schedule:
+    - cron: "40 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bundle
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync environment (runtime dependencies only)
+        run: uv sync --locked --no-dev
+
+      - name: Build bundle
+        id: build
+        run: uv run --no-dev python scripts/build_bundle.py --out data/bundles
+
+      - name: Publish release bundle-<id> (draft -> upload -> publish as latest)
+        env:
+          DIR: ${{ steps.build.outputs.path }}
+          BUNDLE_ID: ${{ steps.build.outputs.bundle_id }}
+          NEXT_EVENT: ${{ steps.build.outputs.next_event }}
+          PRE_DEADLINE: ${{ steps.build.outputs.pre_deadline }}
+        run: |
+          set -euo pipefail
+          assets=("$DIR"/*.parquet "$DIR/manifest.json")
+          tag="bundle-$BUNDLE_ID"
+          notes="Shared-data bundle $BUNDLE_ID (next GW${NEXT_EVENT:-none}, pre_deadline=$PRE_DEADLINE). See manifest.json for checksums."
+          gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" --title "Bundle $BUNDLE_ID" --notes "$notes"
+          gh release edit "$tag" --draft=false --latest
+
+      - name: Publish release deadline-gw<N> (pre-deadline run only; replaces an earlier one for the same GW)
+        if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
+        env:
+          DIR: ${{ steps.build.outputs.path }}
+          BUNDLE_ID: ${{ steps.build.outputs.bundle_id }}
+          NEXT_EVENT: ${{ steps.build.outputs.next_event }}
+        run: |
+          set -euo pipefail
+          assets=("$DIR"/*.parquet "$DIR/manifest.json")
+          tag="deadline-gw$NEXT_EVENT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release delete "$tag" --cleanup-tag --yes
+          fi
+          gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" \
+            --title "Deadline GW$NEXT_EVENT (bundle $BUNDLE_ID)" \
+            --notes "Last bundle published before the GW$NEXT_EVENT deadline: the scored snapshot. Never pruned."
+          gh release edit "$tag" --draft=false --latest=false
+
+      - name: Retention (delete bundle-* releases and tags older than 7 days; never deadline-*)
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '7 days ago' +%Y%m%dT%H%M%SZ)
+          echo "pruning bundle-* older than $cutoff"
+          gh release list --limit 1000 --json tagName --jq '.[].tagName' \
+            | { grep -E '^bundle-[0-9]{8}T[0-9]{6}Z$' || true; } \
+            | while read -r tag; do
+                if [[ "${tag#bundle-}" < "$cutoff" ]]; then
+                  echo "delete release $tag"
+                  gh release delete "$tag" --cleanup-tag --yes
+                fi
+              done
+          git ls-remote --tags origin 'refs/tags/bundle-*' | awk '{print $2}' | sed 's#^refs/tags/##' \
+            | { grep -E '^bundle-[0-9]{8}T[0-9]{6}Z$' || true; } \
+            | while read -r tag; do
+                if [[ "${tag#bundle-}" < "$cutoff" ]]; then
+                  echo "delete orphan tag $tag"
+                  git push origin --delete "refs/tags/$tag"
+                fi
+              done
