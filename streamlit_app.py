@@ -1,37 +1,42 @@
-"""FPL Rocket - hosting spike page (Streamlit Community Cloud entry point).
+"""FPL Rocket - Streamlit Community Cloud entry point: navigation, sidebar (team ID), timestamps.
 
-On load it calls the same four public FPL endpoints as scripts/spike_probe.py from the Streamlit host and
-shows status / latency / bytes with the server UTC time. Nothing else yet.
+Pages live in app_pages/. Community Cloud installs requirements.txt only (not the package), so src/ and
+scripts/ are put on sys.path here before any page imports fpl_rocket.
 """
 
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "src"))  # Community Cloud installs requirements.txt only, not the package
-sys.path.insert(0, str(ROOT / "scripts"))
+for p in (ROOT / "src", ROOT / "scripts"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
-from spike_probe import probe_all  # noqa: E402
+from fpl_rocket import ui  # noqa: E402
 
-st.set_page_config(page_title="FPL Rocket — hosting spike", layout="centered")
-st.title("FPL Rocket — hosting spike")
-st.caption("Calls four public FPL API endpoints from this server with a browser User-Agent.")
+st.set_page_config(page_title="FPL Rocket", page_icon=":rocket:", layout="wide")
 
-if "runs" not in st.session_state or st.button("Probe again"):
-    st.session_state["runs"] = probe_all()
+PAGES = [
+    st.Page(
+        ROOT / "app_pages" / "season_overview.py",
+        title="Season Overview",
+        icon=":material/stadium:",
+        default=True,
+    ),
+    st.Page(ROOT / "app_pages" / "my_team.py", title="My Team", icon=":material/groups:"),
+    st.Page(
+        ROOT / "app_pages" / "compare_players.py", title="Compare Players", icon=":material/compare_arrows:"
+    ),
+    st.Page(ROOT / "app_pages" / "differentials.py", title="Differentials", icon=":material/filter_alt:"),
+    st.Page(ROOT / "app_pages" / "model_planner.py", title="Model & Planner", icon=":material/construction:"),
+    st.Page(ROOT / "app_pages" / "hosting_spike.py", title="Hosting spike", icon=":material/dns:"),
+]
 
-st.write(f"Server UTC time: **{datetime.now(UTC).isoformat(timespec='seconds')}**")
-df = pd.DataFrame(st.session_state["runs"])
-st.dataframe(
-    df[[c for c in ("endpoint", "status", "ms", "bytes", "error", "ts", "host_hint") if c in df]],
-    hide_index=True,
-    use_container_width=True,
-)
-ok = int((df["status"] == 200).sum())
-st.write(f"{ok}/{len(df)} calls returned 200.")
+page = st.navigation(PAGES)
+footer = ui.sidebar()
+page.run()
+ui.footer_timestamps(footer)
