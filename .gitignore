@@ -19,3 +19,7 @@ data/cache/
 
 # Spike local output
 spike/local_*.jsonl
+
+# Community archive downloads and backtest outputs (never committed)
+data/archive/
+data/backtests/
