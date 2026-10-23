@@ -843,7 +843,7 @@ def chip_scenarios(inp: PlannerInput, settings: PlanSettings) -> tuple[Plan, lis
                 used,
                 base.expected_total,
                 plan.expected_total,
-                plan.expected_total - base.expected_total,
+                plan.expected_total - base.expected_total if ok else float("nan"),  # no gain from a fallback
                 "solved" if ok else "fallback",
                 plan.reason or base.reason,
                 plan,
