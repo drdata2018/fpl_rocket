@@ -10,6 +10,12 @@
   chance_of_playing snapshots, so these cannot be trained features. When present (live bundle only) they cap
   P(play): P(play) <- min(P(play), factor), the 1-59 / 60+ split kept. The retrospective backtest runs
   WITHOUT this layer (no such columns in the archive).
+  v0.2.1: when the rows carry `availability_next` (the bundle's availability.parquet GW+1 cap with the
+  staleness relief and the rule-based news, fpl_rocket.news; PROSPECTIVE-ONLY), it replaces chance / 100 as
+  the GW+1 cap; the per-GW decay and the u / n rule are unchanged. predict() also returns the unconstrained
+  P(play) (`p_play_uncapped`) so both caps can be recorded. Fix: the decay now counts GWs after the GW the
+  flag refers to (`flag_steps` = gw - next event), not horizon - 1: while a GW was in progress the next GW
+  (horizon 2) was decayed once, so a suspended / injured player got P(play) 0.5 for the very GW he misses.
 """
 
 from __future__ import annotations
@@ -57,10 +63,18 @@ def _categorical_mask(cfg: ModelConfig) -> list[bool]:
 
 
 def availability_factor(
-    status: pd.Series | None, chance: pd.Series | None, horizon: pd.Series, decay: float
+    status: pd.Series | None,
+    chance: pd.Series | None,
+    horizon: pd.Series,
+    decay: float,
+    next_cap: pd.Series | None = None,
+    steps: pd.Series | None = None,
 ) -> np.ndarray:
     """Cap on P(play) from live flags: GW+1 = chance_of_playing_next_round / 100 (status i/s without a
-    chance -> 0); the shortfall decays by `decay` per extra GW; status u / n -> 0 at every horizon."""
+    chance -> 0), or `next_cap` where given (fpl_rocket.news availability: staleness + news); the shortfall
+    decays by `decay` per GW after the flagged one: `steps` (= gw - the next event, which
+    chance_of_playing_next_round refers to; live bundle) or horizon - 1 when absent; status u / n -> 0 at
+    every horizon."""
     n = len(horizon)
     h = np.asarray(horizon, dtype=float)
     st = pd.Series(status, dtype=object).fillna("a").to_numpy() if status is not None else np.full(n, "a")
@@ -71,7 +85,14 @@ def availability_factor(
     )
     ch = np.where(np.isnan(ch) & np.isin(st, ["i", "s"]), 0.0, ch)
     a = np.where(np.isnan(ch), 1.0, np.clip(ch, 0, 100) / 100.0)
-    factor = 1.0 - (1.0 - a) * decay ** np.clip(h - 1, 0, None)
+    if next_cap is not None:
+        nc = pd.to_numeric(pd.Series(next_cap), errors="coerce").to_numpy(float)
+        a = np.where(np.isnan(nc), a, np.clip(nc, 0.0, 1.0))
+    k = h - 1
+    if steps is not None:
+        st_k = pd.to_numeric(pd.Series(steps), errors="coerce").to_numpy(float)
+        k = np.where(np.isnan(st_k), k, st_k)
+    factor = 1.0 - (1.0 - a) * decay ** np.clip(k, 0, None)
     return np.where(np.isin(st, ["u", "n"]), 0.0, factor)
 
 
@@ -128,7 +149,7 @@ class MinutesModel:
 
     def predict(self, rows: pd.DataFrame) -> pd.DataFrame:
         """rows: output of build_feature_rows (+ optional status / chance_of_playing_next_round).
-        Returns p0, p1, p2, m_short, m_long, availability aligned with rows."""
+        Returns p0, p1, p2, m_short, m_long, availability, p_play_uncapped aligned with rows."""
         assert self.clf is not None, "fit first"
         x = feature_matrix(rows, self.cfg)
         proba = self.clf.predict_proba(x)
@@ -140,8 +161,11 @@ class MinutesModel:
             rows.get("chance_of_playing_next_round"),
             rows["horizon"],
             self.cfg.availability_decay,
+            rows.get("availability_next"),
+            rows.get("flag_steps"),
         )
         play = p[:, 1] + p[:, 2]
+        uncapped = play.copy()
         capped = np.minimum(play, factor)
         scale = np.divide(capped, play, out=np.zeros_like(play), where=play > 0)
         p[:, 1] *= scale
@@ -162,6 +186,7 @@ class MinutesModel:
                 "m_short": m_short,
                 "m_long": m_long,
                 "availability": factor,
+                "p_play_uncapped": uncapped,
             },
             index=rows.index,
         )

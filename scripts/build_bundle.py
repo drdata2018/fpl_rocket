@@ -1,6 +1,7 @@
 """Build one shared-data bundle.
 
 Usage: uv run python scripts/build_bundle.py [--out data/bundles] [--with-model] [--previous URL|DIR|none]
+       [--no-news] [--injury-html SAVED_PAGE]
 
 --previous (default: the GitHub releases of this repo) is the latest published bundle: its element_history
 is reused unless it is older than 6 h, a GW has finished since, or there is none
@@ -9,6 +10,11 @@ is reused unless it is older than 6 h, a GW has finished since, or there is none
 dependency group and the previous season in --archive, written by scripts/load_archive.py) and adds
 xp.parquet, xp_sims.parquet and xp_fixtures.parquet; a model failure is recorded as model_error and the data
 bundle still builds.
+--news (default on) adds the availability news tables (fpl_rocket.news): status_history (carried forward from
+--previous), availability, news_items, news_unmatched. The injury table is fetched once (10 s timeout); a
+failed
+fetch only empties that source. --injury-html reads a saved copy of the page instead (manual runs).
+No paid service is used.
 
 Prints the bundle id, size per file and build time. On GitHub Actions ($GITHUB_OUTPUT set) it also writes
 the step outputs used by .github/workflows/bundle.yml: path, bundle_id, next_event, pre_deadline.
@@ -49,6 +55,17 @@ def model_fn(archive_path: str):
     return run
 
 
+def news_hook(injury_html: str | None):
+    """The bundle's news hook (fpl_rocket.news); `injury_html` replaces the live injury-table fetch."""
+    from fpl_rocket.news import news_fn
+    from fpl_rocket.news.premier_injuries import PremierInjuriesSource
+
+    if injury_html is None:
+        return news_fn()
+    html = Path(injury_html).read_text(encoding="utf-8", errors="replace")
+    return news_fn(sources_factory=lambda now: [PremierInjuriesSource(html=html, now=lambda: now)])
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="data/bundles")
@@ -58,13 +75,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--previous", default=RELEASES_URL, help="releases URL or bundle directory; 'none' = always fetch"
     )
+    ap.add_argument("--news", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--injury-html", default=None, help="saved injury-table page instead of the live fetch")
     args = ap.parse_args(argv)
     t0 = time.monotonic()
     previous, note = fetch_previous_release(None if args.previous == "none" else args.previous)
     prev_id = previous.manifest["bundle_id"] if previous else None
     print(f"previous release: {prev_id or '-'} ({note})")
     model = model_fn(args.archive) if args.with_model else None
-    path = write_bundle(args.out, FPLClient(args.cache), previous=previous, model=model)
+    news = news_hook(args.injury_html) if args.news else None
+    path = write_bundle(args.out, FPLClient(args.cache), previous=previous, model=model, news=news)
     read_bundle(path)  # verify every checksum and row count
     elapsed = time.monotonic() - t0
     m = read_manifest(path)
@@ -75,6 +95,19 @@ def main(argv: list[str] | None = None) -> int:
         f" element_history {m['element_history_source']} ({m['element_history_reason']});"
         f" summaries missing {len(m['element_summary_missing'])}/{m['element_summary_requested']}"
     )
+    if args.news:
+        if m.get("news_error"):
+            print(f"  NEWS FAILED: {m['news_error']}")
+        else:
+            for src in m["news_sources_fetched"]:
+                err = f" ({src['error']})" if src.get("error") else ""
+                print(f"  news source {src['source']}: {src['status']}, {src['items']} items{err}")
+            print(
+                f"  news matched {m['news_items_matched']} / unmatched {m['news_items_unmatched']};"
+                f" FPL text rule coverage {m['news_fpl_text_rule_coverage']}; effects {m['news_effects']};"
+                f" status_history +{m['status_history_appended']} rows ({m['status_history_rows']} total);"
+                f" stale flags {m['availability_stale_players']}"
+            )
     if args.with_model:
         if m.get("model_error"):
             print(f"  MODEL FAILED: {m['model_error']}")

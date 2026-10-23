@@ -35,7 +35,7 @@ from ..rules import CURRENT_SEASON, get_rules
 from .bonus import BonusModel, bonus_feature_frame, bonus_link_table
 from .config import BACKTEST_CONFIG, DEFAULT_CONFIG, MODEL_BASE_VERSION, ModelConfig
 from .features import low_history, player_states
-from .minutes import PLAYER_TYPES, MinutesModel, build_feature_rows, team_fixture_list
+from .minutes import PLAYER_TYPES, MinutesModel, availability_factor, build_feature_rows, team_fixture_list
 from .newcomers import NewcomerPrior, price_band, shrink_to_band
 from .rates import PlayerRates
 from .simulate import aggregate, simulate_gw
@@ -574,6 +574,8 @@ def bundle_targets(
     done = events.loc[events["finished"].fillna(False).astype(bool), "id"]
     last_finished = int(done.max()) if len(done) else first - 1
     tg["horizon"] = tg["gw"] - last_finished
+    # GWs after the one chance_of_playing_next_round refers to (the next event): the live cap's decay steps
+    tg["flag_steps"] = tg["gw"] - first
     tg = (
         tg[tg["element_type"].isin(PLAYER_TYPES)]
         .sort_values(["gw", "fixture", "element"])
@@ -592,7 +594,11 @@ def run_bundle_model(
     n_gws: int = 6,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Fit on archive (previous season) + bundle (current season) and predict the next n_gws GWs.
-    Returns ({xp, xp_sims, xp_fixtures}, manifest fields)."""
+    Returns ({xp, xp_sims, xp_fixtures[, availability]}, manifest fields).
+
+    With the news stage's `availability` table in `tables` (fpl_rocket.news), its GW+1 cap (cap_with_news, or
+    cap_model_only when cfg.news_in_cap is False) is the live availability cap, and the returned availability
+    table gets p_play_unconstrained / p_play_model_only / p_play_with_news (see live_p_play)."""
     from .team_goals import previous_season
 
     t0 = time.perf_counter()
@@ -602,6 +608,12 @@ def run_bundle_model(
     targets, players = bundle_targets(tables, n_gws, season)
     if targets.empty:
         raise ValueError("no upcoming fixtures (season over?)")
+    avail = tables.get("availability")
+    avail = _df(avail) if avail is not None else None
+    if avail is not None and len(avail):
+        caps = avail[["element", "cap_model_only", "cap_with_news"]].astype({"element": "int64"})
+        targets = targets.merge(caps, on="element", how="left")
+        targets["availability_next"] = targets["cap_with_news" if cfg.news_in_cap else "cap_model_only"]
     teams = sorted(_df(tables["teams"])["name"].astype(str))
     ref = pd.Timestamp(now or datetime.now(UTC))
     model = XPModel(cfg).fit(history, season=season, ref_time=ref, season_teams=teams)
@@ -628,5 +640,45 @@ def run_bundle_model(
         "model_n_sims": cfg.n_sims,
         "model_runtime_s": round(elapsed, 1),
         "model_timings_s": {k: round(v, 2) for k, v in out.timings.items()},
+        "model_availability_cap": (
+            ("cap_with_news" if cfg.news_in_cap else "cap_model_only") if avail is not None else "fpl_flags"
+        ),
     }
-    return {"xp": xp, "xp_sims": out.sims, "xp_fixtures": fixtures}, manifest
+    result = {"xp": xp, "xp_sims": out.sims, "xp_fixtures": fixtures}
+    if avail is not None and len(avail):
+        result["availability"] = live_p_play(avail, out.lines, cfg)
+    return result, manifest
+
+
+def live_p_play(avail: pd.DataFrame, lines: pd.DataFrame, cfg: ModelConfig) -> pd.DataFrame:
+    """availability + GW+1 P(play) of each player's FIRST fixture of the next predicted GW:
+    p_play_unconstrained (the minutes classifier alone), p_play_model_only = min(that, factor from
+    cap_model_only), p_play_with_news = min(that, factor from cap_with_news); factor = the minutes model's
+    availability_factor (decay steps = GWs after the flagged GW). Players without a fixture there keep NaN."""
+    out = avail.copy()
+    if lines.empty or "p_play_uncapped" not in lines:
+        return out
+    first_gw = int(lines["gw"].min())
+    r = lines[lines["gw"] == first_gw].sort_values(["element", "kickoff_time", "fixture"], kind="stable")
+    r = r.drop_duplicates("element", keep="first")
+    r = r.drop(columns=[c for c in ("cap_model_only", "cap_with_news") if c in r]).merge(
+        avail[["element", "cap_model_only", "cap_with_news"]], on="element", how="left"
+    )
+    unc = r["p_play_uncapped"].to_numpy(float)
+    status, chance = r.get("status"), r.get("chance_of_playing_next_round")
+    steps = r.get("flag_steps")
+    decay = cfg.availability_decay
+    f_model = availability_factor(status, chance, r["horizon"], decay, r["cap_model_only"], steps)
+    f_news = availability_factor(status, chance, r["horizon"], decay, r["cap_with_news"], steps)
+    vals = pd.DataFrame(
+        {
+            "element": r["element"].astype("int64").to_numpy(),
+            "p_play_unconstrained": unc,
+            "p_play_model_only": np.minimum(unc, f_model),
+            "p_play_with_news": np.minimum(unc, f_news),
+        }
+    )
+    out = out.drop(columns=["p_play_unconstrained", "p_play_model_only", "p_play_with_news"], errors="ignore")
+    out = out.merge(vals, on="element", how="left")
+    out["next_event"] = pd.array([first_gw] * len(out), dtype="Int64")
+    return out

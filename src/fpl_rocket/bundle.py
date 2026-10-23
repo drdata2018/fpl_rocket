@@ -33,6 +33,18 @@ plus the bootstrap now_cost. The manifest records element_history_source = "fetc
 
 Optional model tables (scripts/build_bundle.py --with-model; fpl_rocket.model): xp, xp_sims, xp_fixtures, with
 model_version / model_fitted_on / model_features in the manifest. The app does not read them yet.
+
+Optional news tables (scripts/build_bundle.py --news, on by default; fpl_rocket.news):
+    status_history   FPL status / chance / news changes between consecutive bundles, carried forward from the
+                     previous release (one row per element and observation where something changed)
+    availability     per player: news recency (days since status change / news_added, transitions, stale
+                     flag),
+                     rule-parsed news, the GW+1 caps cap_fpl / cap_model_only / cap_with_news and, with the
+                     model,
+                     p_play_unconstrained / p_play_model_only / p_play_with_news
+    news_items       matched news items (FPL news text + the public injury table) with the rule that read them
+    news_unmatched   items no player could be matched to (kept for inspection, never guessed)
+with news_* / status_history_* fields in the manifest; a news failure is recorded as news_error.
 """
 
 from __future__ import annotations
@@ -328,12 +340,18 @@ def _clone_factory(client: FPLClient) -> Callable[[], FPLClient]:
 
 
 # ============================================================================== previous release
+# tables of the previous release carried forward when present (missing or unreadable -> simply absent)
+PREVIOUS_OPTIONAL_TABLES = ("status_history",)
+
+
 @dataclass
 class PreviousRelease:
-    """The latest published bundle: its manifest and element_history (checksum-verified)."""
+    """The latest published bundle: its manifest, element_history and the optional carried-forward tables
+    (PREVIOUS_OPTIONAL_TABLES), all checksum-verified."""
 
     manifest: JSON
     element_history: pd.DataFrame
+    extra: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 def _read_release_file(source: str, name: str, bundle_id: str | None = None) -> bytes:
@@ -358,7 +376,16 @@ def fetch_previous_release(source: str | None) -> tuple[PreviousRelease | None, 
         name = "element_history.parquet"
         data = _read_release_file(source, name, str(manifest["bundle_id"]))
         verified_file(manifest, name, data)
-        return PreviousRelease(manifest, pd.read_parquet(io.BytesIO(data))), "ok"
+        extra: dict[str, pd.DataFrame] = {}
+        listed = {f.get("table") for f in manifest.get("files", [])}
+        for table in PREVIOUS_OPTIONAL_TABLES:
+            if table not in listed:
+                continue
+            with contextlib.suppress(Exception):  # optional: a bad copy only means "start afresh"
+                raw = _read_release_file(source, f"{table}.parquet", str(manifest["bundle_id"]))
+                verified_file(manifest, f"{table}.parquet", raw)
+                extra[table] = pd.read_parquet(io.BytesIO(raw))
+        return PreviousRelease(manifest, pd.read_parquet(io.BytesIO(data)), extra), "ok"
     except requests.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else None
         return None, "no previous release" if code == 404 else f"previous release unreadable (HTTP {code})"
@@ -564,6 +591,9 @@ def write_tables(
 
 
 ModelFn = Callable[[dict[str, Table]], tuple[dict[str, Table], dict[str, Any]]]
+NewsFn = Callable[
+    [dict[str, Table], "PreviousRelease | None", datetime], tuple[dict[str, Table], dict[str, Any]]
+]
 
 
 def write_bundle(
@@ -573,15 +603,26 @@ def write_bundle(
     now: Callable[[], datetime] = _utc_now,
     previous: PreviousRelease | None = None,
     model: ModelFn | None = None,
+    news: NewsFn | None = None,
     **build_kw: Any,
 ) -> Path:
     """Pull the shared data (bootstrap, fixtures, finished GWs' live data, element summaries unless reused
     from `previous`) and write one immutable bundle whose manifest carries the deadline flags.
 
     `model(tables) -> (extra tables, manifest fields)` adds the xP tables (scripts/build_bundle.py
-    --with-model); a model failure is recorded as model_error and the data bundle is still written."""
+    --with-model); a model failure is recorded as model_error and the data bundle is still written.
+    `news(tables, previous, now) -> (news tables, manifest fields)` runs first (fpl_rocket.news; the model
+    reads
+    its `availability`); a news failure is recorded as news_error."""
     result = build_tables(client or FPLClient(), now, previous=previous, **build_kw)
     tables = dict(result.tables)
+    news_extra: dict[str, Any] = {}
+    if news is not None:
+        try:
+            news_tables, news_extra = news(tables, previous, now())
+            tables.update(news_tables)
+        except Exception as exc:  # noqa: BLE001 - shared data must still publish; the failure is recorded
+            news_extra = {"news_error": f"{type(exc).__name__}: {exc}"}
     model_extra: dict[str, Any] = {}
     if model is not None:
         try:
@@ -593,6 +634,7 @@ def write_bundle(
     events = table_records(result.tables["events"]) if isinstance(result.tables["events"], pa.Table) else []
     extra = {
         **result.extra,
+        **news_extra,
         **model_extra,
         **deadline_info(events, created),
         "pre_deadline_window_minutes": list(PRE_DEADLINE_WINDOW_MIN),

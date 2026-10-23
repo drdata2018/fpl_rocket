@@ -22,6 +22,9 @@ show xP yet). Live app: https://fpl-rocket.streamlit.app
   Monte Carlo scored by the rules engine), `pipeline.py` (fit/predict, bundle hook, backtest predictor),
   `evaluate.py`, `config.py` (a-priori hyperparameters). Needs the `model` dependency group (scikit-learn,
   scipy); NOT in `requirements.txt` - the app never fits models.
+- `src/fpl_rocket/news/` - availability news for the live P(play) cap (step 3d): FPL flag recency
+  (`status_history`), the public injury table, the FPL API's own news text, name matching, rule-based text
+  parsing. No paid service.
 - `src/fpl_rocket/views.py` - pure table builders for the pages (offline-testable).
 - `src/fpl_rocket/ui.py` - sidebar (team ID), per-feature error guard, formatting, pitch.
 - `src/fpl_rocket/config.py` - placeholder team ID and cache settings (the only place the ID appears).
@@ -76,6 +79,31 @@ uses the live FPL API as before and the sidebar shows **live API fallback** with
 **Run workflow** -> branch `main` -> **Run workflow**. After about 2-3 minutes **Releases** shows
 `Bundle <id>` marked *Latest*; the app switches to it within 5 minutes (or at once after a reboot of the
 app). Until then every page works on the live API with the fallback notice. Later runs are automatic.
+
+## Availability news (live cap, prospective-only)
+
+Every bundle build (`build_bundle.py --news`, on by default) adds four tables; no API key or paid service is
+involved:
+
+- `status_history` - FPL `status` / `chance_of_playing_next_round` / `news` / `news_added` changes between
+  consecutive bundles, carried forward from the previous release (FPL keeps no history of these flags).
+- `news_items` / `news_unmatched` - news per player from the FPL API's `news` text and the public injury table
+  at premierinjuries.com (one fetch per build, 10 s timeout; on any failure the source is empty and the
+  manifest says why). Names are matched accent- and case-insensitively within the player's club; anything not
+  matched to exactly one player is kept in `news_unmatched`, never guessed.
+- `availability` - per player: days since the last status change and since `news_added`, status transitions
+  in the last 14 days, a `stale` flag (d / i with news older than 7 days and no change since), the rule that
+  read the news (`NEWS_TEXT_RULES` in `model/config.py`), the GW+1 caps `cap_fpl` / `cap_model_only` /
+  `cap_with_news`, and with the model `p_play_model_only` / `p_play_with_news`, so the registry can score both.
+
+Rules (model v0.2.1, constants in `ModelConfig`, all prospective-only - nothing here can be backtested): a stale
+`d` flag relaxes toward the model's own P(play) (half the shortfall at most); news with confidence medium or
+better can lower the cap; it can raise it only for a stale flag, from a source newer than `news_added`, and
+only half-way. The decay of the cap now counts GWs after the GW the FPL flag refers to.
+Manifest: `news_sources_fetched`, `news_items_matched` / `news_items_unmatched`, `news_rules_version`,
+`news_fpl_text_rule_coverage`, `news_effects`, `status_history_*`, `availability_stale_players`.
+Known fragility: premierinjuries.com answers non-browser clients with a Cloudflare challenge (HTTP 403), so the
+injury table is usually empty in automated builds; `--injury-html <saved page>` reads a saved copy instead.
 
 ## Archive and backtest
 
