@@ -9,6 +9,8 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=15",
     "streamlit>=1.66",
+    "pulp>=3.3.2",
+    "highspy>=1.15.1",
 ]
 
 [dependency-groups]
