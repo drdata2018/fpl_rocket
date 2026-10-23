@@ -1,0 +1,62 @@
+# Prospective registry scoring (fpl_rocket.registry, docs/PLAN_v2.md section 4): daily at 06:00 UTC (and on
+# demand), score every finished and data-checked GW from REGISTRY_START_GW on that has no row yet in
+# registry/registry_scores.csv on the orphan branch `spike-log`. The deadline-gw<N> release assets written by
+# the bundle workflow are compared with actual points and the roster managers' picks. A GW without registry
+# assets (no pre-deadline bundle, or the registry step failed) gets a status=missing row: never skipped.
+name: registry-score
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: spike-log
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync environment (runtime dependencies only)
+        run: uv sync --locked --no-dev
+
+      - name: Prepare spike-log worktree (create orphan branch if missing)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin spike-log >/dev/null; then
+            git fetch --depth=1 origin spike-log:spike-log
+            git worktree add ../spike-log spike-log
+          else
+            git worktree add --detach ../spike-log
+            cd ../spike-log
+            git checkout --orphan spike-log
+            git rm -rf --quiet .
+          fi
+
+      - name: Score finished GWs not yet scored
+        run: uv run --no-sync python scripts/registry_score.py --auto --csv ../spike-log/registry/registry_scores.csv
+
+      - name: Commit and push (only when new rows were written)
+        run: |
+          cd ../spike-log
+          git add registry/registry_scores.csv 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "nothing new to commit"
+            exit 0
+          fi
+          git commit -m "registry: scores $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git push origin spike-log && exit 0
+            git pull --rebase origin spike-log
+          done
+          exit 1

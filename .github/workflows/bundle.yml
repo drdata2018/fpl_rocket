@@ -9,6 +9,9 @@
 # reused (manifest: element_history_source = fetched | reused:<bundle_id>).
 # The xP model (fpl_rocket.model, dependency group "model") is fitted here on the archived previous season
 # (cached) + the current season from the bundle; the app does not read xp yet.
+# Prospective registry (fpl_rocket.registry): for the pre-deadline bundle, scripts/registry_write.py adds
+# registry_xp.parquet / registry_plans.json / registry_meta.json to the deadline-gw<N> release (scored later
+# by registry_score.yml); if it fails, the release is published without them and the week scores as missing.
 # Releases are created as drafts, filled with every asset, then published, so readers never see a release
 # without its files. Retention: bundle-* releases and tags older than 48 hours are deleted; deadline-* never.
 name: bundle
@@ -74,6 +77,14 @@ jobs:
           gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" --title "Bundle $BUNDLE_ID" --notes "$notes"
           gh release edit "$tag" --draft=false --latest
 
+      - name: Registry assets (pre-deadline bundle only; a failure leaves the week to be scored as missing)
+        id: registry
+        if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
+        continue-on-error: true
+        env:
+          DIR: ${{ steps.build.outputs.path }}
+        run: uv run --no-sync python scripts/registry_write.py --bundle "$DIR" --out data/registry --archive data/archive/all_gws.parquet
+
       - name: Publish release deadline-gw<N> (pre-deadline bundle only; replaces an earlier one for the same GW)
         if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
         env:
@@ -82,7 +93,10 @@ jobs:
           NEXT_EVENT: ${{ steps.build.outputs.next_event }}
         run: |
           set -euo pipefail
-          assets=("$DIR"/*.parquet "$DIR/manifest.json")
+          shopt -s nullglob
+          # bundle files + the prospective-registry assets (registry_xp.parquet, registry_plans.json,
+          # registry_meta.json) when the registry step succeeded
+          assets=("$DIR"/*.parquet "$DIR/manifest.json" data/registry/registry_*)
           tag="deadline-gw$NEXT_EVENT"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release delete "$tag" --cleanup-tag --yes
