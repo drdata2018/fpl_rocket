@@ -422,7 +422,10 @@ def derive(model: XPModel, variant: Variant, train: pd.DataFrame, fit_kwargs: di
         if cur.empty:
             return None
         cfg = dataclasses.replace(model.cfg, warmup_gws=0, **variant.changes)
-        m = XPModel(cfg).fit(cur, **fit_kwargs)
+        try:
+            m = XPModel(cfg).fit(cur, **fit_kwargs)
+        except ValueError:  # e.g. GW2: one GW of rows, a minutes feature is missing everywhere
+            return None
     elif variant.refit is not None:
         raise ValueError(f"unknown refit {variant.refit!r}")
     return m

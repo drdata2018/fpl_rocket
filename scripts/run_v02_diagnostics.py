@@ -79,7 +79,15 @@ def run_tasks(tasks: list[tuple[str, tuple]], archive: str, workers: int) -> dic
     with ProcessPoolExecutor(max_workers=workers, initializer=_init, initargs=(archive,)) as ex:
         futures = [ex.submit(_task, k, a) for k, a in tasks]
         for i, fut in enumerate(as_completed(futures), 1):
-            kind, key, out, secs = fut.result()
+            try:
+                kind, key, out, secs = fut.result()
+            except Exception as exc:  # noqa: BLE001 - record the failed task, keep the others
+                failed = tasks[futures.index(fut)]
+                print(f"  [{i}/{len(tasks)}] FAILED {failed[0]} {failed[1][:2]}: {exc!r}", flush=True)
+                frames.setdefault("failed", []).append(
+                    pd.DataFrame([{"kind": failed[0], "task": str(failed[1][:2]), "error": repr(exc)}])
+                )
+                continue
             for name, f in out.items():
                 frames.setdefault(name, []).append(f)
             print(f"  [{i}/{len(tasks)}] {kind} {key} {secs:.0f} s", flush=True)
@@ -153,7 +161,9 @@ def decide_tables(players: pd.DataFrame, metrics: pd.DataFrame) -> dict[str, pd.
     nf.insert(0, "subgroup", "low_history")
     nf_all = group_error(players, fb_cols, [])
     nf_all.insert(0, "subgroup", "all players")
-    by_hist = group_error(low.assign(hist=np.where(low["n_hist"] == 0, "0 GWs", "1-2 GWs")), fb_cols, ["hist"])
+    by_hist = group_error(
+        low.assign(hist=np.where(low["n_hist"] == 0, "0 GWs", "1-2 GWs")), fb_cols, ["hist"]
+    )
     by_hist.insert(0, "subgroup", "low_history by n_hist")
     out["newcomers"] = pd.concat([nf, by_hist, nf_all], ignore_index=True)
     share = players.groupby("gw")["low_history"].mean()
@@ -222,8 +232,15 @@ def minutes_tables(lines: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
     lines = lines.assign(rotation=lines["starts_last_5"].between(1, 4))
-    for season, s in [*lines.groupby("season"), ("2024-25 + 2025-26", lines[lines["season"].isin(TEST_SEASONS)])]:
-        for group, g in (("all", s), ("rotation_risk", s[s["rotation"]]), ("low_history", s[s["low_history"]])):
+    for season, s in [
+        *lines.groupby("season"),
+        ("2024-25 + 2025-26", lines[lines["season"].isin(TEST_SEASONS)]),
+    ]:
+        for group, g in (
+            ("all", s),
+            ("rotation_risk", s[s["rotation"]]),
+            ("low_history", s[s["low_history"]]),
+        ):
             if g.empty:
                 continue
             b = g["bin"].to_numpy()
@@ -291,7 +308,9 @@ def horizon_tables(h: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     sums = []
     for window in (1, 3, 6):
         w = h[h["h"] <= window]
-        agg = w.groupby(["season", "origin", "element"])[["model", "naive", "base", "actual", "minutes"]].sum()
+        agg = w.groupby(["season", "origin", "element"])[
+            ["model", "naive", "base", "actual", "minutes"]
+        ].sum()
         agg = agg.reset_index()
         for season, g in [*agg.groupby("season"), ("pooled", agg)]:
             r = {"season": season, "window_gws": window, "n": len(g)}
@@ -464,20 +483,22 @@ def summarise_report(out: Path, stamp: str, decide_stamp: str | None, runtime_s:
 
     L: list[str] = []
     L += [
-        f"# xP model {MODEL_BASE_VERSION}-{git_sha_short()}: diagnostics and fixes after the independent review"
-        f" ({stamp})",
+        f"# xP model {MODEL_BASE_VERSION}-{git_sha_short()}: diagnostics and fixes after the independent"
+        f" review ({stamp})",
         "",
         "RETROSPECTIVE track: rolling origin on the vaastav archive (end-of-GW data; player pool, positions,",
         "club per fixture and the fixture list as played are known after the fact; no historical status /",
         "chance_of_playing). Every number below uses that caveat.",
         "",
-        "**Choice protocol.** Every modelling choice was made on season 2023-24 only (folds trained on 2022-23 +",
+        "**Choice protocol.** Every modelling choice was made on season 2023-24 only (folds trained on",
+        "2022-23 +",
         f"2023-24; decide run {decide_stamp or 'n/a'}), then frozen in src/fpl_rocket/model/config.py and",
         "reported on 2024-25 / 2025-26 (76 folds) and 2026-27 GW1-6 (current season, separately). Chosen:",
         f"`newcomer_fallback = {C.newcomer_fallback}`, `bonus_sim = {C.bonus_sim}`. The DefCon prior is a",
         "documented constant (2025-26 position rates), not a tuned choice.",
         "",
-        "Variants: v01 = v0.1 behaviour; v02 = all v0.2 options; v02_notail = v02 with the v0.1 bonus rounding;",
+        "Variants: v01 = v0.1 behaviour; v02 = all v0.2 options; v02_notail = v02 with the v0.1 bonus",
+        "rounding;",
         "v02_nofb = v02 without the newcomer fallback; abl_* = v02 minus one component (section 7).",
         "",
     ]
@@ -503,14 +524,16 @@ def summarise_report(out: Path, stamp: str, decide_stamp: str | None, runtime_s:
         "",
         "Mean difference over GWs with a 95% CI from a moving-block bootstrap over consecutive GWs (block 4,",
         "2000 resamples, blocks within a season), and a two-sided sign test (a_better_gws of non_tied_gws).",
-        "xi_points = actual points of the best legal XI + captain by prediction (unmatched decision metric; the",
+        "xi_points = actual points of the best legal XI + captain by prediction (unmatched decision",
+        "metric; the",
         "GW average cancels in the difference).",
         "",
         md_table(paired),
         "",
         "## 2. Minutes: classifier vs persistence vs 5-GW frequency (log-loss, 3 classes, lower is better)",
         "",
-        "persistence = bin of the last GW (0.9 / 0.05 / 0.05); freq_5gw = add-0.5 bin frequencies over the last 5",
+        "persistence = bin of the last GW (0.9 / 0.05 / 0.05); freq_5gw = add-0.5 bin frequencies over",
+        "the last 5",
         "GWs (training base rates without history); constant_in_sample = the evaluated rows' own class",
         "frequencies (an in-sample bound for any constant). rotation_risk = 1-4 starts in the last 5 GWs.",
         "",
@@ -526,7 +549,8 @@ def summarise_report(out: Path, stamp: str, decide_stamp: str | None, runtime_s:
         "",
         md_table(newc["share"]),
         "",
-        "Error on the low_history subgroup (before = v02_nofb; after = v02; v01 and the baseline for reference):",
+        "Error on the low_history subgroup (before = v02_nofb; after = v02; v01 and the baseline for",
+        "reference):",
         "",
         md_table(newc["error"]),
         "",
@@ -539,7 +563,8 @@ def summarise_report(out: Path, stamp: str, decide_stamp: str | None, runtime_s:
         "## 5. Horizon backtest (origins 0..32; t+1 .. t+6 with the fixtures listed for those GWs)",
         "",
         "model = v02 trained on horizons 1-6; naive = the horizon-1 xP per fixture x fixtures in that GW;",
-        "base = form per 90 x availability x fixtures. Fixtures as played (postponements known after the fact).",
+        "base = form per 90 x availability x fixtures. Fixtures as played (postponements known after",
+        "the fact).",
         "",
         md_table(h_tab),
         "",
@@ -550,7 +575,8 @@ def summarise_report(out: Path, stamp: str, decide_stamp: str | None, runtime_s:
         "## 6. Interval diagnostics (v02)",
         "",
         "Observed share of actual points below p20 / above p80 next to the model-implied share (the mean of",
-        "the model's own P(X < p20) and P(X > p80) from its simulations). Points are integers and the quantiles",
+        "the model's own P(X < p20) and P(X > p80) from its simulations). Points are integers and the",
+        "quantiles",
         "are inclusive integer quantiles, so a calibrated model shows LESS than 20% outside each side; the",
         "model-implied columns are the honest nominal values. Groups by the pre-kickoff P(play).",
         "",
@@ -564,8 +590,9 @@ def summarise_report(out: Path, stamp: str, decide_stamp: str | None, runtime_s:
         "## 7. Ablations (v02 minus one component; 2024-25 and 2025-26)",
         "",
         "abl_noshrink = shares without shrinkage (pseudo-minutes 0); abl_naivegoals = league-average goals",
-        "instead of Dixon-Coles; abl_persistence = persistence minutes instead of the classifier; abl_noprev =",
-        "no previous-season rows (GW1 cannot be predicted: compared on GW2-38). delta = ablation - v02;",
+        "instead of Dixon-Coles; abl_persistence = persistence minutes instead of the classifier;",
+        "abl_noprev =",
+        "no previous-season rows (GW1-2 cannot be fitted: compared on GW3-38). delta = ablation - v02;",
         "positive delta_rmse / negative delta_sp = the component helps.",
         "",
         md_table(abl),
@@ -648,6 +675,8 @@ def main(argv: list[str] | None = None) -> int:
         tasks += [("fold", (season, g, vs)) for g in gws_of(df, season)]
     frames = run_tasks(tasks, args.archive, args.workers)
     pre = out / f"{stamp}_v02"
+    if "failed" in frames:
+        pd.concat(frames["failed"]).to_csv(f"{pre}_failed_tasks.csv", index=False)
     for name, key in (
         ("players", ["season", "gw", "element"]),
         ("metrics", ["season", "gw", "predictor"]),

@@ -282,7 +282,8 @@ def model_report(
         f" minutes {t['fit_minutes_s'].mean():.2f} s,"
         f" rates + bonus {t['fit_rates_bonus_s'].mean():.2f} s, simulation {t['simulate_s'].mean():.2f} s.",
         "",
-        "## Hyperparameters (fixed a priori, src/fpl_rocket/model/config.py; none tuned on these seasons)",
+        "## Hyperparameters (src/fpl_rocket/model/config.py; fixed a priori, except newcomer_fallback and",
+        "bonus_sim, chosen on 2023-24 only; none tuned on the seasons above)",
         "",
     ]
     hp = {k: v for k, v in BACKTEST_CONFIG.as_dict().items() if not k.endswith("features")}

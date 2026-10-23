@@ -184,9 +184,8 @@ def test_shrink_and_withhold_fallbacks(fitted):
 def test_xp_output_has_low_history_and_with_config_shares_components(fitted):
     model, target = fitted
     other = model.with_config(bonus_sim="linked")
-    assert (
-        other.minutes is model.minutes and other.cfg.bonus_sim == "linked" and model.cfg.bonus_sim == "poisson"
-    )
+    assert other.minutes is model.minutes and other.cfg.bonus_sim == "linked"
+    assert model.cfg.bonus_sim == "poisson"
     xp = other.predict(target, n_sims=100).xp
     assert tuple(xp.columns) == XP_COLUMNS and xp["low_history"].dtype == bool
     assert xp["low_history"].any()
