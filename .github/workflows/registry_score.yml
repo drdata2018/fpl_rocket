@@ -3,6 +3,8 @@
 # registry/registry_scores.csv on the orphan branch `spike-log`. The deadline-gw<N> release assets written by
 # the bundle workflow are compared with actual points and the roster managers' picks. A GW without registry
 # assets (no pre-deadline bundle, or the registry step failed) gets a status=missing row: never skipped.
+# The four virtual managers (fpl_rocket.trajectories) are scored in the same run into
+# registry/trajectories_scores.csv (realised points with auto-subs, hits, cumulative, vs the official average).
 name: registry-score
 
 on:
@@ -44,12 +46,13 @@ jobs:
           fi
 
       - name: Score finished GWs not yet scored
-        run: uv run --no-sync python scripts/registry_score.py --auto --csv ../spike-log/registry/registry_scores.csv
+        run: uv run --no-sync python scripts/registry_score.py --auto --csv ../spike-log/registry/registry_scores.csv --trajectories-csv ../spike-log/registry/trajectories_scores.csv
 
-      - name: Commit and push (only when new rows were written)
+      - name: Commit and push (only when new rows were written; also after a failed scoring step)
+        if: ${{ !cancelled() }}
         run: |
           cd ../spike-log
-          git add registry/registry_scores.csv 2>/dev/null || true
+          git add registry/registry_scores.csv registry/trajectories_scores.csv 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "nothing new to commit"
             exit 0

@@ -10,6 +10,10 @@ multi-GW path and (d) chip scenarios.
 
 The planner (PuLP + HiGHS) is imported in a guard: if the solver cannot be installed on the host, this page
 still renders the planning state and the registry status, and no other page imports the planner.
+
+Public section "Four virtual managers" (fpl_rocket.trajectories): cumulative points of the four prospective
+policy trajectories and the latest scored GW's line-ups, read from registry/trajectories_scores.csv on the
+spike-log branch. A GW's choices are never shown before it has been scored.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from collections import Counter
 import pandas as pd
 import streamlit as st
 
-from fpl_rocket import config, data, registry, ui, views
+from fpl_rocket import config, data, registry, trajectories, ui, views
 from fpl_rocket.rules.season_2026_27 import SQUAD
 
 PLANNER_ERROR: str | None = None
@@ -278,6 +282,69 @@ def _shadow_section() -> None:
         st.caption(f"The solver is not available on this host ({PLANNER_ERROR}); recording runs elsewhere.")
 
 
+def _trajectories_section() -> None:
+    """Four virtual managers (fpl_rocket.trajectories): scored weeks only; a GW's choices appear after it."""
+    st.subheader(f"Four virtual managers (prospective, from GW{registry.REGISTRY_START_GW})")
+    st.markdown(
+        "Four virtual FPL managers started from the same squad (the most-owned legal 15 under 100.0 at the "
+        f"GW{registry.REGISTRY_START_GW} deadline) and play every gameweek without chips: **Model, "
+        "aggressive** (the planner on the model's xP, 3-gameweek horizon, up to 2 transfers, hits allowed), "
+        "**Model, restrained** (same xP, at most 1 transfer, never a hit), **Form, restrained** (the same "
+        "restrained rule on form per 90 x availability) and **Hold** (never transfers). Each squad, line-up "
+        "and transfer was chosen and published *before* the deadline it was played in, and is scored "
+        "afterwards with automatic substitutions and hits. They are a test of the planner, **not a "
+        "recommendation**; a gameweek's choices are shown here only after it has been scored."
+    )
+    scores, reason = data.trajectory_scores()
+    s = trajectories.summary(scores)
+    if s is None:
+        why = f" ({reason})" if reason and reason != "no scores yet" else ""
+        st.caption(
+            f"No scores yet{why}; the first scored gameweek is GW{registry.REGISTRY_START_GW}, once it is "
+            "finished and its data checked."
+        )
+        return
+    st.markdown(f"Last scored: **GW{s['gw']}**")
+    st.line_chart(s["cumulative"], x_label="Gameweek", y_label="Cumulative points (net of hits)")
+    ui.table(
+        s["table"],
+        {
+            "Points this GW": st.column_config.NumberColumn(format="%d"),
+            "Cumulative": st.column_config.NumberColumn(format="%d"),
+            "Transfers (total)": st.column_config.NumberColumn(format="%d"),
+            "Hits (total)": st.column_config.NumberColumn(format="%d"),
+            "vs average (cumulative)": st.column_config.NumberColumn(format="%+.0f"),
+        },
+    )
+    st.caption(
+        "Points are net of 4-point hits; 'vs average' sums each gameweek's points minus the official average "
+        "manager score. Status 'missing' / 'solver_error' / 'fallback' = no solved plan was recorded before "
+        "that deadline: the squad and line-up were carried forward and still scored."
+        + (f" Flagged in GW{s['gw']}: {', '.join(s['flagged'])}." if s["flagged"] else "")
+    )
+    names: dict[int, str] = {}
+    with ui.guard("Player names"):
+        pl = data.players()
+        names = {int(i): f"{n} ({t})" for i, n, t in zip(pl["id"], pl["name"], pl["team"], strict=True)}
+
+    def label(ids: list[int]) -> str:
+        return ", ".join(names.get(e, str(e)) for e in ids) or "-"
+
+    with st.expander(f"Line-ups played in GW{s['gw']} (chosen before its deadline)"):
+        for r in s["latest"].itertuples(index=False):
+            xi = trajectories.parse_ids(r.xi)
+            if not xi:
+                st.markdown(f"**{ui.md_escape(str(r.label))}**: no line-up ({r.status}).")
+                continue
+            cap = names.get(int(r.captain), str(int(r.captain)))
+            moves = ""
+            t_in, t_out = trajectories.parse_ids(r.transfers_in), trajectories.parse_ids(r.transfers_out)
+            if t_in or t_out:
+                moves = f" Transfers: out {label(t_out)}; in {label(t_in)}."
+            bench = label(trajectories.parse_ids(r.bench))
+            st.markdown(ui.md_escape(f"{r.label}: captain {cap}. XI {label(xi)}. Bench {bench}.{moves}"))
+
+
 def _registry_section() -> None:
     st.subheader("Prospective registry")
     st.caption(
@@ -372,5 +439,7 @@ if tid is not None:
                 )
 if not SHOW_PLANS:
     _shadow_section()
+with ui.guard("Virtual managers"):
+    _trajectories_section()
 with ui.guard("Prospective registry"):
     _registry_section()

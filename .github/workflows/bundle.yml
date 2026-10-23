@@ -17,6 +17,10 @@
 # roster. The step runs AFTER bundle-<id> is published, only for the pre-deadline bundle, with
 # continue-on-error and its own timeout: if it fails, deadline-gw<N> is published without the registry files
 # and the week scores as missing.
+# Virtual managers (fpl_rocket.trajectories): for the pre-deadline bundle (GW >= 9), BEFORE the registry step,
+# scripts/trajectories_write.py loads the previous state from the latest earlier deadline-gw<k> release and
+# writes trajectories_state.json / trajectories_plans.json (four policies from one start squad) into
+# deadline-gw<N>; continue-on-error with its own timeout: a failure leaves the week to be scored as missing.
 # Releases are created as drafts, filled with every asset, then published, so readers never see a release
 # without its files. Retention: bundle-* releases and tags older than 48 hours are deleted; deadline-* never.
 name: bundle
@@ -82,6 +86,15 @@ jobs:
           gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" --title "Bundle $BUNDLE_ID" --notes "$notes"
           gh release edit "$tag" --draft=false --latest
 
+      - name: Virtual managers (pre-deadline bundle only, GW >= 9; a failure records the week as missing)
+        id: trajectories
+        if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          DIR: ${{ steps.build.outputs.path }}
+        run: uv run --no-sync python scripts/trajectories_write.py --bundle "$DIR" --out data/registry --archive data/archive/all_gws.parquet
+
       - name: Registry assets (pre-deadline bundle only; a failure leaves the week to be scored as missing)
         id: registry
         if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
@@ -101,8 +114,9 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           # bundle files + the prospective-registry assets (registry_xp.parquet, registry_plans.json,
-          # registry_meta.json) when the registry step succeeded
-          assets=("$DIR"/*.parquet "$DIR/manifest.json" data/registry/registry_*)
+          # registry_meta.json) and the virtual managers (trajectories_state.json, trajectories_plans.json)
+          # when those steps succeeded
+          assets=("$DIR"/*.parquet "$DIR/manifest.json" data/registry/registry_* data/registry/trajectories_*)
           tag="deadline-gw$NEXT_EVENT"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release delete "$tag" --cleanup-tag --yes

@@ -15,7 +15,7 @@ it is never written to the URL unless you open **Copy shareable link**, and noth
 | **My Team** | Rank and points per gameweek, value, bank and chips, the squad on a pitch, captain hindsight, transfer ledger, classic leagues, and the reconstructed planning state (squad, purchase and selling prices, bank, free-transfer range). |
 | **Compare Players** | 2-4 players side by side: season metrics, points per gameweek, the next 5 fixtures; plus the experimental model rows below. |
 | **Differentials** | Players under an ownership threshold (position, price and club filters) with form, minutes and the next 5 fixtures; plus the experimental model columns below. |
-| **Model & Planner** | Your planning state with confirm / edit (session-only corrections), how the planner is being tested, and the prospective registry's latest scores. No plan is shown (shadow mode). |
+| **Model & Planner** | Your planning state with confirm / edit (session-only corrections), how the planner is being tested, the four virtual managers (prospective, from GW9) and the prospective registry's latest scores. No plan is shown before its deadline has passed (shadow mode). |
 
 **Experimental (shown, with caveats).** From xP model v0.2.1 (`v0.2.1-<git sha>`), in Compare Players and
 Differentials only:
@@ -46,6 +46,26 @@ manager's own, and the planned line-up's points (automatic substitutions, armban
 (c)) vs the baseline and the manager's actual score. A deadline without a snapshot is recorded as
 **missing**, never skipped. Scores live in `registry/registry_scores.csv` on the `spike-log` branch; the Model
 & Planner page shows the latest.
+
+**Four virtual managers (prospective policy trajectories, from GW9).** The decisive test of the planner: four
+virtual FPL managers start from the SAME squad and play every gameweek without chips, each choice recorded
+before its deadline. *Model, aggressive* (planner objective (c): 3-GW horizon, decay 0.85, up to 2 transfers,
+hits when the objective says so), *Model, restrained* (same xP, at most 1 transfer, never a hit, free
+transfers banked under the rules), *Form, restrained* (the restrained rule on the frozen form-per-90 baseline)
+and *Hold* (never transfers; best XI + captain by the baseline). Start (`trajectories.START_RULE`, favours
+neither predictor): the most-owned legal 15 under 100.0 at the GW9 deadline prices - players ranked by
+`selected_by_percent` (ties: cheaper, then lower id) and taken greedily while the position has an open slot
+(2/5/5/3), the club has fewer than 3 picks and the money left still pays for the cheapest legal completion;
+selectable players only; bank = 100.0 - cost; 1 free transfer entering GW10. Each pre-deadline run reads the
+previous state from the latest earlier `deadline-gw<k>` release (never a `bundle-*` one; a read error other
+than "not found" aborts instead of restarting) and writes `trajectories_state.json` (squads with purchase
+prices, bank, free transfers, transfer log, line-ups, provisional points) and `trajectories_plans.json` (XI,
+captain, vice, bench order, transfers of GW N) into `deadline-gw<N>`. A GW without them is recorded as
+**missing**: squad and line-up carried forward (free transfers accrue), still scored with automatic
+substitutions. The daily scorer appends realised points (automatic substitutions, armband, hits), cumulative
+totals and the official GW average (`events.average_entry_score`) to `registry/trajectories_scores.csv` on
+`spike-log`; missing / solver_error / fallback weeks are flagged. The Model & Planner page shows the
+cumulative chart and table, and a GW's line-ups only after it has been scored.
 
 **Zero-cost rule.** Free public data only (the official FPL API, the public injury table, the community
 archive for backtests). No paid services, no API keys, no logins, no cookies; hosting is the Streamlit
@@ -96,14 +116,20 @@ Community Cloud free tier, data jobs run on GitHub Actions and are published as 
   `inputs.py` (planning state -> planner input, session edits), `lineup.py` (best XI, bench, auto subs,
   realised points).
 - `src/fpl_rocket/registry.py` - prospective registry: writer (deadline snapshot), reader, scorer.
-- `src/fpl_rocket/matched.py` - matched-policy backtest (MODEL vs BASELINE planner vs HOLD, same start).
+- `src/fpl_rocket/trajectories.py` - the four virtual managers: start rule, deadline step, carry-forward,
+  missing weeks, scoring, app summary.
+- `src/fpl_rocket/matched.py` - matched-policy backtest: aggressive (MODEL vs BASELINE planner vs HOLD) or
+  restrained (MODEL_RESTRAINED vs FORM_RESTRAINED vs HOLD) policy sets, start rules, fixtures as known,
+  per-season prediction cache, paired block bootstrap and sign test.
+- `src/fpl_rocket/fixtures_known.py` - deadline-known fixtures from the community archive's git history.
 - `src/fpl_rocket/views.py` - pure table builders for the pages (offline-testable).
 - `src/fpl_rocket/ui.py` - sidebar (team ID), per-feature error guard, formatting, pitch, model captions.
 - `src/fpl_rocket/config.py` - placeholder team ID, cache settings, `SHOW_SHADOW_PLANS`.
 - `streamlit_app.py` - entry point: navigation + sidebar; pages in `app_pages/`.
-- `scripts/` - `build_bundle.py`, `registry_write.py`, `registry_score.py`, `reconcile_points.py <gw>`,
-  `state_summary.py <ids>`, `acceptance.py`, `record_app_snapshot.py`, `load_archive.py`, `run_backtest.py`,
-  `run_matched.py`, `run_decision_diagnostics.py`, `spike_probe.py`.
+- `scripts/` - `build_bundle.py`, `registry_write.py`, `trajectories_write.py`, `registry_score.py`,
+  `reconcile_points.py <gw>`, `state_summary.py <ids>`, `acceptance.py`, `record_app_snapshot.py`,
+  `load_archive.py`, `run_backtest.py`, `run_matched.py`, `build_fixtures_as_known.py`,
+  `run_decision_diagnostics.py`, `spike_probe.py`.
 
 ## Run
 
@@ -145,7 +171,10 @@ uv run python scripts/build_bundle.py --out data/bundles --with-model   # one bu
   `registry_xp.parquet`, `registry_plans.json` (objectives (a), (b), (c) per roster team) and
   `registry_meta.json` (model version, N, rules version, exclusions) to `deadline-gw<N>`. The step has
   `continue-on-error` and its own timeout: a failure never blocks either release, the week scores as missing.
-  `.github/workflows/registry_score.yml` scores finished GWs daily at 06:00 UTC.
+  Before it, `trajectories_write.py` (its own `continue-on-error` step, 10 min) adds the four virtual managers'
+  `trajectories_state.json` / `trajectories_plans.json` (from GW9 on).
+  `.github/workflows/registry_score.yml` scores finished GWs daily at 06:00 UTC (registry and virtual managers;
+  `registry_score.py --trajectories-csv`).
 
 The app reads `https://github.com/drdata2018/fpl_rocket/releases/latest/download/manifest.json` (cached 300 s),
 then the files of that bundle from its own tag, checks every sha256 and serves all shared data from that one
@@ -190,6 +219,19 @@ manifest (url, sha256), parses them with pandas only (untrusted data, nothing ex
 `data/archive/all_gws.parquet` (one row per season, GW, player, fixture; `code` = cross-season player id).
 Null by season: `defensive_contribution`, `clearances_blocks_interceptions`, `recoveries`, `tackles` before
 2025-26; expected goals/assists and `starts` exist for every loaded season (2022-23 on).
+
+```bash
+uv run python -I scripts/run_matched.py --seasons 2024-25 2025-26 --policies restrained --start most_owned \
+    --pred-cache data/backtests/pred_cache --workers 16 --resamples 5000
+uv run python -I scripts/build_fixtures_as_known.py --repo data/vaastav_meta --seasons 2024-25 2025-26
+uv run python -I scripts/run_matched.py --seasons 2024-25 2025-26 --fixtures-as-known data/archive/fixtures_as_known
+```
+
+`run_matched.py` replays planner policies from one start squad (RETROSPECTIVE, matched): `--policies
+aggressive` (MODEL vs BASELINE planner, <= 2 transfers, hits) or `restrained` (the virtual managers' rule);
+`--start baseline_xp | most_owned`; `--fixtures-as-known` plans with the schedule as known at each deadline
+(snapshots from the community archive repository's git history, `build_fixtures_as_known.py`, which also
+writes a coverage report); scoring always uses actual results.
 
 `run_backtest.py` writes `data/backtests/<timestamp>_<predictor>.csv` (+ calibration and summary) and prints
 the summary. It is a RETROSPECTIVE track (end-of-GW archive data). The decision metric (best legal XI +

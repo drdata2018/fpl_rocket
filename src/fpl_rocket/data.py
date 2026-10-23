@@ -24,7 +24,8 @@ from the spike-log branch (raw URL, cached 600 s, failures too).
 Environment (tests / offline replay only): FPL_ROCKET_CACHE_DIR = raw JSON cache directory,
 FPL_ROCKET_OFFLINE=1 = never touch the network (bundles disabled unless a source is set),
 FPL_ROCKET_BUNDLE_SOURCE = releases base URL, a local bundle directory, or "off",
-FPL_ROCKET_REGISTRY_SCORES = registry_scores.csv path or URL, or "off" (offline default: off).
+FPL_ROCKET_REGISTRY_SCORES = registry_scores.csv path or URL, or "off" (offline default: off),
+FPL_ROCKET_TRAJECTORY_SCORES = trajectories_scores.csv path or URL, or "off" (offline default: off).
 """
 
 from __future__ import annotations
@@ -286,7 +287,7 @@ def registry_scores_source() -> str | None:
     return SCORES_URL
 
 
-@st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=2)
+@st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=4)
 def _registry_scores(source: str) -> tuple[pd.DataFrame | None, str | None]:
     try:
         if _is_remote(source):
@@ -306,6 +307,25 @@ def registry_scores() -> tuple[pd.DataFrame | None, str | None]:
     if src is None:
         return None, "no scores yet"
     return _registry_scores(src)
+
+
+def trajectory_scores_source() -> str | None:
+    src = os.environ.get("FPL_ROCKET_TRAJECTORY_SCORES")
+    if src:
+        return None if src.lower() == "off" else src
+    if os.environ.get("FPL_ROCKET_OFFLINE") == "1":
+        return None
+    from .trajectories import SCORES_URL
+
+    return SCORES_URL
+
+
+def trajectory_scores() -> tuple[pd.DataFrame | None, str | None]:
+    """(trajectories_scores.csv, None) or (None, reason): the four virtual managers' scored weeks."""
+    src = trajectory_scores_source()
+    if src is None:
+        return None, "no scores yet"
+    return _registry_scores(src)  # same reader and cache (keyed by source)
 
 
 # ============================================================================================ shared layer

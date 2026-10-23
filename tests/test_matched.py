@@ -142,3 +142,60 @@ def test_low_history_players_are_flagged_until_three_gws():
     lows = matched.low_history_sets(df, "2024-25")
     assert newcomer in lows[1] and newcomer in lows[3] and newcomer not in lows[4]
     assert len(lows[1]) == 1
+
+
+def test_restrained_set_from_the_most_owned_start_never_takes_a_hit():
+    df = _archive()
+    preds = {"model": FormPer90Baseline(form_window=2), "baseline": FormPer90Baseline()}
+    rows = matched.run_season(
+        df, "2024-25", preds, policies=matched.RESTRAINED, start="most_owned", time_limit=20
+    )
+    assert set(rows["policy"]) == {"model_restrained", "form_restrained", "hold"}
+    gw1 = rows[rows["gw"] == 1]
+    assert gw1["squad"].nunique() == 1 and (gw1["bank"] >= 0).all()
+    owners = df[(df["season"] == "2024-25") & (df["gw"] == 1)].set_index("element")["selected"]
+    squad = [int(e) for e in gw1["squad"].iloc[0].split(",")]
+    assert int(owners.idxmax()) in squad  # the most-owned player starts
+    planned = rows[rows["policy"] != "hold"]
+    assert (planned["hits"] == 0).all() and (planned["transfers"] <= 1).all()
+    assert (planned["net"] == planned["points"]).all()
+    summary, paired = matched.summarise(rows, resamples=100)
+    assert [tuple(p) for p in paired[["a", "b"]].to_numpy()] == list(matched.PAIRS["restrained"])
+    assert paired["sign_test_p"].between(0, 1).all()
+
+
+def test_sign_test_exact_binomial():
+    assert matched.sign_test(np.array([1.0, 2.0, 3.0, -1.0, 0.0])) == pytest.approx(0.625)
+    assert matched.sign_test(np.array([1.0] * 10)) == pytest.approx(2 / 1024)
+    assert np.isnan(matched.sign_test(np.array([0.0, 0.0])))
+
+
+def test_fixtures_as_known_change_the_plan_not_the_score():
+    """A schedule as known in which club 2 blanks in GW2-3 (it played): the planner sees no GW2-3 fixture for
+    its players (no xP), the realised points of an XI are still the actual ones."""
+    df = _archive()
+    s = df[df["season"] == "2024-25"]
+    fx = s.drop_duplicates("fixture")[["fixture", "gw", "team_id", "opponent_id", "was_home"]]
+    sched = pd.DataFrame(
+        {
+            "fixture": fx["fixture"],
+            "event": fx["gw"],
+            "team_h": np.where(fx["was_home"], fx["team_id"], fx["opponent_id"]),
+            "team_a": np.where(fx["was_home"], fx["opponent_id"], fx["team_id"]),
+        }
+    )
+    known = {}
+    for t in range(1, GWS + 1):
+        k = sched.copy()
+        moved = (k["team_h"] == 2) | (k["team_a"] == 2)
+        k.loc[moved & k["event"].isin([2, 3]), "event"] = np.nan
+        known[t] = k
+    team_of = s.drop_duplicates("element").set_index("element")["team_id"].to_dict()
+    counts = matched.known_counts(known[1], [1, 2, 3], team_of)
+    star = df.attrs["star"]
+    assert counts[1][star] >= 1 and counts[2][star] == 0 and counts[3][star] == 0
+    preds = {"model": FormPer90Baseline(form_window=2), "baseline": FormPer90Baseline()}
+    rows = matched.run_season(df, "2024-25", preds, fixtures_as_known=known, time_limit=20)
+    played = rows[(rows["policy"] != "hold") & (rows["gw"].isin([2, 3]))]
+    assert not played["squad"].str.split(",").apply(lambda q: str(star) in q).any()
+    assert (rows["net"] == rows["points"] - 4 * rows["hits"]).all()

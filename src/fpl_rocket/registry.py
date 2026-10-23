@@ -167,6 +167,20 @@ def baseline_xp(history_rows: pd.DataFrame, targets: pd.DataFrame) -> pd.Series:
     return pd.Series(pred.to_numpy(float), index=tp["element"].astype(int).to_numpy(), name="baseline_xp")
 
 
+def baseline_per_fixture(history_rows: pd.DataFrame, players: pd.DataFrame) -> pd.Series:
+    """The frozen baseline's per-fixture xP for every player of `players` (columns element, code): the
+    prediction behind `baseline_xp` before it is multiplied by the GW's fixture count (trajectories)."""
+    from .backtest import FormPer90Baseline
+
+    base = FormPer90Baseline()
+    base.fit(history_rows)
+    tp = pd.DataFrame(
+        {"element": players["element"].astype(int), "code": players["code"], "n_fixtures": 1}
+    ).reset_index(drop=True)
+    pred = base.predict(tp, 0)
+    return pd.Series(pred.to_numpy(float), index=tp["element"].to_numpy(), name="baseline_per_fixture")
+
+
 def build_registry(
     *,
     manifest: JSON,
