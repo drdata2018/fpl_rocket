@@ -1,0 +1,5 @@
+# Streamlit Community Cloud installs from this file (keep minimal; dev deps live in pyproject.toml)
+streamlit>=1.38
+requests>=2.31
+pandas>=2.2
+pyarrow>=15

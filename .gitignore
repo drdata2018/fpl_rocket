@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Data bundles and raw caches (never committed)
+data/bundles/
+data/**/*.parquet
+data/cache/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Spike local output
+spike/local_*.jsonl
