@@ -296,3 +296,26 @@ def pitch_html(rows: dict[str, list[dict[str, Any]]], points_label: str) -> str:
         '<div style="color:#fff;font-size:12px;text-align:center">Bench</div>'
         f"{bench}</div>"
     )
+
+
+# ============================================================================================ model (xP)
+XP_HELP = (
+    "EXPERIMENTAL xP model {version}: mean expected points for the NEXT gameweek only. Validated by a "
+    "retrospective backtest only (no prospective record yet); not advice. 'insufficient history' = a "
+    "newcomer whose prediction is unreliable."
+)
+
+
+def xp_columns(version: str | None) -> dict[str, Any]:
+    """Column config for the experimental one-GW xP / P(play) display columns."""
+    from . import views
+
+    return {
+        "xp_next": st.column_config.TextColumn(
+            views.xp_label(version), help=XP_HELP.format(version=version or "")
+        ),
+        "p_play": st.column_config.TextColumn(
+            "P(play)",
+            help="Probability of playing any minutes next gameweek (experimental model, same caveats as xP).",
+        ),
+    }

@@ -16,13 +16,20 @@ Each loader returns its payload; fetch times are kept alongside so the sidebar c
 and "team data as of". Exceptions (FPLAPIError, EntryNotFound, PlanningStateError) propagate to the page,
 which degrades per feature (ui.guard). Failed calls are never cached.
 
+MODEL (experimental, Phase B): xp.parquet of the SAME bundle (sha256-checked, held per bundle_id); only
+when shared data comes from a bundle. A missing column `low_history` is treated as all False. Plans are
+cached by (team ID, planning-state hash, bundle id, settings). The prospective registry's scores are read
+from the spike-log branch (raw URL, cached 600 s, failures too).
+
 Environment (tests / offline replay only): FPL_ROCKET_CACHE_DIR = raw JSON cache directory,
 FPL_ROCKET_OFFLINE=1 = never touch the network (bundles disabled unless a source is set),
-FPL_ROCKET_BUNDLE_SOURCE = releases base URL, a local bundle directory, or "off".
+FPL_ROCKET_BUNDLE_SOURCE = releases base URL, a local bundle directory, or "off",
+FPL_ROCKET_REGISTRY_SCORES = registry_scores.csv path or URL, or "off" (offline default: off).
 """
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import threading
@@ -37,7 +44,7 @@ import streamlit as st
 
 from . import views
 from .api import FPLClient
-from .bundle import APP_TABLES, MANIFEST, AppShared, app_shared
+from .bundle import APP_TABLES, MANIFEST, AppShared, app_shared, verified_file
 from .config import (
     BUNDLE_MAX_AGE_H,
     BUNDLE_TIMEOUT_S,
@@ -182,6 +189,116 @@ def _bundle_part(bundle_id: str, part: str, _b: AppShared) -> Any:
 def _from_bundle(part: str) -> Any:
     b, _ = _active()
     return None if b is None else _bundle_part(b.bundle_id, part, b)
+
+
+# ============================================================================================ model (xP)
+XP_FILE = "xp.parquet"
+
+
+@st.cache_data(ttl=SHARED_TTL_S, show_spinner="Loading the xP table...", max_entries=2)
+def _xp(source: str, bundle_id: str, _manifest: JSON) -> tuple[pd.DataFrame | None, str | None]:
+    """(xp table, None) or (None, reason): xp.parquet of bundle `bundle_id`, sha256-checked."""
+    names = {f["name"] for f in _manifest.get("files", [])}
+    if XP_FILE not in names:
+        err = _manifest.get("model_error")
+        return None, f"bundle {bundle_id} has no xP table" + (f" (model error: {err})" if err else "")
+    try:
+        raw = _read(source, XP_FILE, bundle_id)
+        verified_file(_manifest, XP_FILE, raw)
+        df = pd.read_parquet(io.BytesIO(raw))
+    except Exception as exc:  # noqa: BLE001 - the model is optional; pages degrade
+        return None, _err(exc)
+    if "low_history" not in df:
+        df["low_history"] = False
+    df["low_history"] = df["low_history"].fillna(False).astype(bool)
+    return df, None
+
+
+def _xp_source() -> tuple[str | None, JSON | None, AppShared | None, str | None]:
+    b, status = _active()
+    if b is None:
+        why = status.get("reason") or "shared data come from the live API"
+        return None, None, None, f"no model bundle ({why})"
+    src = bundle_source()
+    m, err = _manifest(src) if src else (None, "no bundle source")
+    if m is None or str(m.get("bundle_id")) != b.bundle_id:
+        return None, None, None, err or "bundle changed; reload the page"
+    return src, m, b, None
+
+
+def model_status() -> JSON:
+    """{"available", "reason", "model_version", "version" (e.g. v0.1), "bundle_id", "created_at"} of the xP
+    table of the bundle in use (only when shared data comes from a bundle)."""
+    src, m, b, err = _xp_source()
+    if src is None or m is None or b is None:
+        return {"available": False, "reason": err}
+    df, err = _xp(src, b.bundle_id, m)
+    version = str(m.get("model_version") or "")
+    return {
+        "available": df is not None,
+        "reason": err,
+        "model_version": version or None,
+        "version": version.split("-")[0] if version else None,
+        "bundle_id": b.bundle_id,
+        "created_at": b.created_at,
+    }
+
+
+def xp_table() -> pd.DataFrame | None:
+    """The xP table of the bundle in use, or None (model_status says why)."""
+    src, m, b, _ = _xp_source()
+    if src is None or m is None or b is None:
+        return None
+    return _xp(src, b.bundle_id, m)[0]
+
+
+@st.cache_data(ttl=TEAM_TTL_S, show_spinner="Solving the plan...", max_entries=TEAM_CACHE_ENTRIES)
+def plan(team_id: int, state_key: tuple, bundle_id: str, settings: Any, _inp: Any) -> Any:
+    """A planner.Plan cached by (team ID, planning-state hash, bundle id, objective settings)."""
+    from .planner import solve
+
+    return solve(_inp, settings)
+
+
+@st.cache_data(ttl=TEAM_TTL_S, show_spinner="Solving the chip scenarios...", max_entries=TEAM_CACHE_ENTRIES)
+def chip_plans(team_id: int, state_key: tuple, bundle_id: str, settings: Any, _inp: Any) -> Any:
+    """(plan without chips, [ChipScenario]) cached like plan()."""
+    from .planner import chip_scenarios
+
+    return chip_scenarios(_inp, settings)
+
+
+def registry_scores_source() -> str | None:
+    src = os.environ.get("FPL_ROCKET_REGISTRY_SCORES")
+    if src:
+        return None if src.lower() == "off" else src
+    if os.environ.get("FPL_ROCKET_OFFLINE") == "1":
+        return None
+    from .registry import SCORES_URL
+
+    return SCORES_URL
+
+
+@st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=2)
+def _registry_scores(source: str) -> tuple[pd.DataFrame | None, str | None]:
+    try:
+        if _is_remote(source):
+            resp = requests.get(source, timeout=BUNDLE_TIMEOUT_S, headers={"User-Agent": "fpl-rocket-app"})
+            resp.raise_for_status()
+            return pd.read_csv(io.BytesIO(resp.content)), None
+        return pd.read_csv(source), None
+    except (requests.HTTPError, FileNotFoundError):
+        return None, "no scores yet"
+    except Exception as exc:  # noqa: BLE001 - the page shows the reason
+        return None, f"scores unavailable ({type(exc).__name__})"
+
+
+def registry_scores() -> tuple[pd.DataFrame | None, str | None]:
+    """(registry_scores.csv, None) or (None, reason): the prospective registry's scorecard."""
+    src = registry_scores_source()
+    if src is None:
+        return None, "no scores yet"
+    return _registry_scores(src)
 
 
 # ============================================================================================ shared layer

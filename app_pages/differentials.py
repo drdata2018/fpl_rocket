@@ -1,4 +1,6 @@
-"""Differentials v0: low-ownership players with descriptive columns. No model, no recommendations."""
+"""Differentials: low-ownership players with descriptive columns, plus the EXPERIMENTAL one-GW xP and
+P(play) when the model bundle is available ("insufficient history" for newcomers). No recommendations;
+no multi-GW sums."""
 
 from __future__ import annotations
 
@@ -7,7 +9,10 @@ import streamlit as st
 from fpl_rocket import data, ui, views
 
 st.title("Differentials")
-st.info("Descriptive only — no model yet. Low ownership and recent form are not recommendations.")
+st.info(
+    "Descriptive columns plus an experimental one-gameweek xP and P(play) (model backtested "
+    "retrospectively only). Low ownership, form and xP are not recommendations."
+)
 
 players = boot = None
 with ui.guard("FPL season data"):
@@ -33,6 +38,10 @@ if players is not None:
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Fixtures unavailable: {ui.reason(exc)}.")
             fixtures = []
+        model = data.model_status()
+        xpn = None
+        if model.get("available"):
+            xpn = views.xp_next(data.xp_table(), views.next_gw(boot))
         df = views.differentials(
             players,
             live,
@@ -42,6 +51,7 @@ if players is not None:
             pos=None if pos == "All" else pos,
             price_range=price,
             clubs=clubs or None,
+            xp=xpn,
         )
         st.caption(f"{len(df)} players. Sorted by total points (click a header to re-sort).")
         ui.table(
@@ -51,6 +61,14 @@ if players is not None:
                 "next_fixtures": st.column_config.TextColumn(
                     "Next 5 fixtures (FPL difficulty)", width="large"
                 ),
+                **ui.xp_columns(model.get("version")),
             },
             height=600,
         )
+        if xpn is None:
+            st.caption(f"xP columns unavailable: {model.get('reason') or 'no model bundle'}.")
+        else:
+            st.caption(
+                f"xP and P(play): experimental model {model.get('model_version')} (bundle "
+                f"{model.get('bundle_id')}), next gameweek only; hover the column headers for the caveats."
+            )

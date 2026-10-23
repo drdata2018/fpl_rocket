@@ -3,3 +3,5 @@ streamlit>=1.66  # lazy st.expander(on_change=...) and st.navigation; altair shi
 requests>=2.31
 pandas>=2.2
 pyarrow>=15
+pulp>=3.3.2  # the planner (docs/PLAN_v2.md section 4)
+highspy>=1.15  # the planner's MIP solver (HiGHS), in-process
