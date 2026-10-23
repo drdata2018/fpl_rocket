@@ -1,0 +1,57 @@
+# Day-1 hosting spike (docs/PLAN_v2.md section 2): probe the public FPL API from a GitHub-hosted runner every
+# 3 hours and append the results to spike/actions_log.jsonl on the orphan branch `spike-log`.
+name: spike
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: spike-log
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install probe dependency
+        run: pip install "requests>=2.31"
+
+      - name: Prepare spike-log worktree (create orphan branch if missing)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin spike-log >/dev/null; then
+            git fetch --depth=1 origin spike-log:spike-log
+            git worktree add ../spike-log spike-log
+          else
+            git worktree add --detach ../spike-log
+            cd ../spike-log
+            git checkout --orphan spike-log
+            git rm -rf --quiet .
+          fi
+
+      - name: Probe
+        run: python scripts/spike_probe.py --out ../spike-log/spike/actions_log.jsonl
+
+      - name: Commit and push
+        run: |
+          cd ../spike-log
+          git add spike/actions_log.jsonl
+          git commit -m "spike: probe $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git push origin spike-log && exit 0
+            git pull --rebase origin spike-log
+          done
+          exit 1
