@@ -370,7 +370,7 @@ def test_bundle_model_outputs_and_manifest_fields(df, tmp_path):
     injured = xp[(xp["element"] % 100 == 2) & (xp["gw"] == 8)]
     assert (injured["p_play"] == 0).all()  # live flag: chance_of_playing_next_round 0
     assert xp.loc[xp["element"] % 100 == 12, "penalties_order"].eq(1.0).all()
-    assert man["model_version"].startswith("v0.1-") and man["model_n_sims"] == 50
+    assert man["model_version"].startswith("v0.2-") and man["model_n_sims"] == 50
     assert man["model_fitted_on"]["seasons"] == [SEASON1, SEASON2] and man["model_fitted_on"]["promoted"]
     assert "minutes" in man["model_features"] and man["model_hyperparameters"]["dc_xi"] == 0.0065
     path = write_tables({**out}, tmp_path, {}, bundle_id="M1", extra=man)

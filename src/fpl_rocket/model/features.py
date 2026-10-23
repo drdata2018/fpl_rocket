@@ -9,6 +9,8 @@ current season is converted to it by pipeline.bundle_history_rows). Players are 
   season / (90 x team fixtures this season)).
 * attach_states(): for target rows (t, horizon h) the latest state with state_t <= t - h, i.e. as known
   h GWs before the target (h = 1: at the target's deadline).
+* history_gw_counts() / low_history(): GWs of history per player in a training window (cross-season
+  `code`); a player with fewer than ModelConfig.low_history_gws (3) is flagged `low_history`.
 * schedule_features(): per (team, fixture) days since the team's previous match (capped) and the number of
   team fixtures in that GW - from the fixture list, which is known in advance.
 """
@@ -44,6 +46,9 @@ def player_states(history: pd.DataFrame) -> pd.DataFrame:
     h = history.assign(pkey=pkey(history), t=season_t(history["season"], history["gw"]))
     h["minutes"] = h["minutes"].astype("Float64").fillna(0).astype(float)
     h["starts"] = h["starts"].astype("Float64").fillna(0).astype(float)
+    mbin = minutes_bin(h["minutes"])
+    for b in range(3):
+        h[f"bin{b}"] = (mbin == b).astype(float)
     g = (
         h.groupby(["pkey", "t"], as_index=False, sort=True)
         .agg(
@@ -52,12 +57,15 @@ def player_states(history: pd.DataFrame) -> pd.DataFrame:
             minutes=("minutes", "sum"),
             starts=("starts", "sum"),
             fixtures=("fixture", "nunique"),
+            bin0=("bin0", "sum"),
+            bin1=("bin1", "sum"),
+            bin2=("bin2", "sum"),
         )
         .sort_values(["pkey", "t"], kind="stable")
         .reset_index(drop=True)
     )
     by = g.groupby("pkey", sort=False)
-    cums = {c: by[c].cumsum() for c in ("minutes", "starts", "fixtures")}
+    cums = {c: by[c].cumsum() for c in ("minutes", "starts", "fixtures", "bin0", "bin1", "bin2")}
 
     def window(col: str, k: int) -> pd.Series:  # sum over the player's last k rows (incl. this one)
         cs = cums[col]
@@ -69,13 +77,34 @@ def player_states(history: pd.DataFrame) -> pd.DataFrame:
         g[f"starts_pf_{k}"] = st / fx.clip(lower=1)
         if k == 5:
             g["starts_last_5"] = st
+        if k in (1, 5):
+            for b in range(3):
+                g[f"bin{b}_{k}"] = window(f"bin{b}", k)
     g["n_hist_5"] = by.cumcount().add(1).clip(upper=5).astype(float)
     # season minutes share: player's minutes this season / (90 x his team's fixtures this season so far)
     g["season_minutes"] = g.groupby(["pkey", "season"], sort=False)["minutes"].cumsum()
     team_fx = team_fixture_counts(history)
     g = g.merge(team_fx, on=["season", "team", "t"], how="left")
     g["season_min_share"] = g["season_minutes"] / (90.0 * g["team_cum_fx"].clip(lower=1))
-    return g.drop(columns=["minutes", "starts", "fixtures", "season_minutes", "team_cum_fx"])
+    drop = ["minutes", "starts", "fixtures", "season_minutes", "team_cum_fx", "bin0", "bin1", "bin2"]
+    return g.drop(columns=drop)
+
+
+def history_gw_counts(history: pd.DataFrame) -> pd.Series:
+    """pkey -> number of distinct (season, gw) with a row for the player in `history` (any minutes)."""
+    if history.empty:
+        return pd.Series(dtype="int64")
+    h = pd.DataFrame({"pkey": pkey(history), "t": season_t(history["season"], history["gw"])})
+    return h.drop_duplicates().groupby("pkey").size().astype("int64")
+
+
+def low_history(
+    targets: pd.DataFrame, history: pd.DataFrame, min_gws: int = 3
+) -> tuple[pd.Series, pd.Series]:
+    """(n_hist, low_history) per target row: GWs of history in the training window, and n_hist < min_gws.
+    A player new to the window (new signing, promoted-club player, academy debut) has n_hist 0."""
+    n = pkey(targets).map(history_gw_counts(history)).fillna(0).astype("int64")
+    return n.rename("n_hist"), (n < min_gws).rename("low_history")
 
 
 def team_fixture_counts(history: pd.DataFrame) -> pd.DataFrame:

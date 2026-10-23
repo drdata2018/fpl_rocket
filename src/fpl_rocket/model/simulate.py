@@ -14,8 +14,10 @@ Per simulation s (N = ModelConfig.n_sims):
 5. saves (GK) ~ Poisson(saves90 * lambda_opponent / league mean goals * minutes / 90); yellow / red cards ~
    Bernoulli(rate90 * minutes / 90); defensive contribution ~ Bernoulli(P(Poisson(dc90 * minutes / 90) >=
    threshold)) with the threshold of the rules engine, recorded as a count at the threshold or 0;
-6. bonus = the bonus model's expectation for the bin (NOT simulated from the goals), integer-rounded without
-   bias (floor + Bernoulli(fraction));
+6. bonus = the bonus model's expectation for the bin, made an integer per ModelConfig.bonus_sim: "round"
+   (v0.1: floor + Bernoulli(fraction), independent of the simulated goals), "poisson" (min(Poisson(e), 3))
+   or "linked" (e x m(position, simulated goals, assists, clean sheet) / mean of m over the row's playing
+   simulations, then unbiased rounding: a simulated goal carries its bonus, the mean is kept);
 7. EVERY simulated stat line is scored by the rules engine (rules.points_from_stats, per fixture; a double
    GW is the sum of its fixtures). There is no second scoring implementation: distinct stat lines are scored
    once each by the engine and mapped back.
@@ -85,6 +87,73 @@ def score_lines(lines: np.ndarray, season: str) -> np.ndarray:
     return pts[inverse.ravel()]
 
 
+COMPONENTS = (
+    "appearance",
+    "goals",
+    "assists",
+    "clean_sheet",
+    "saves",
+    "goals_conceded",
+    "cards",
+    "bonus",
+    "defcon",
+)
+
+
+def component_points(
+    element_type: np.ndarray,
+    minutes: np.ndarray,
+    goals: np.ndarray,
+    assists: np.ndarray,
+    clean_sheets: np.ndarray,
+    goals_conceded: np.ndarray,
+    saves: np.ndarray,
+    yellow: np.ndarray,
+    red: np.ndarray,
+    bonus: np.ndarray,
+    defcon: np.ndarray,
+    season: str,
+) -> dict[str, np.ndarray]:
+    """Points per scoring component (COMPONENTS) of per-fixture stat lines, vectorised from the season's
+    ScoringTable (the same table the rules engine applies; tests check the sum equals the engine's total for
+    every simulated stat). Used by the diagnostics (where do misses above p80 come from)."""
+    t = get_rules(season).SCORING
+    et = np.asarray(element_type, dtype=np.int64)
+    m = np.asarray(minutes, dtype=float)
+    played = m > 0
+    long_game = m >= t.long_minutes
+
+    def by_pos(table: dict, default: float = 0.0) -> np.ndarray:
+        lut = np.array([float(table.get(k, default) or 0.0) for k in range(5)])
+        return lut[et]
+
+    gc_pos = np.isin(et, list(t.goals_conceded_positions))
+    sv_pos = np.isin(et, list(t.save_point_positions))
+    thr_lut = np.array(
+        [np.nan]
+        + [np.nan if t.defcon_threshold.get(k) is None else t.defcon_threshold[k] for k in range(1, 5)]
+    )
+    thr = thr_lut[et]
+    dc_hit = ~np.isnan(thr) & (np.asarray(defcon, dtype=float) >= np.nan_to_num(thr, nan=np.inf))
+    out = {
+        "appearance": np.where(long_game, t.appearance_long, np.where(played, t.appearance_short, 0)),
+        "goals": goals * by_pos(t.goal),
+        "assists": assists * t.assist,
+        "clean_sheet": np.where(long_game, clean_sheets, 0) * by_pos(t.clean_sheet),
+        "saves": np.where(sv_pos, np.asarray(saves, dtype=np.int64) // t.saves_per_point, 0),
+        "goals_conceded": np.where(
+            gc_pos,
+            (np.asarray(goals_conceded, dtype=np.int64) // t.goals_conceded_per_point)
+            * t.goals_conceded_point,
+            0,
+        ),
+        "cards": yellow * t.yellow + red * t.red,
+        "bonus": np.asarray(bonus, dtype=float),
+        "defcon": np.where(dc_hit, t.defcon_points, 0),
+    }
+    return {k: np.where(played, np.asarray(v, dtype=float), 0.0) for k, v in out.items()}
+
+
 def _allocate(rng: np.random.Generator, n: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Multinomial allocation of n[s] events over players with weights[s, j] (+ an unattributed remainder).
     Returns counts (S, J); each row sums to <= n[s]."""
@@ -106,10 +175,13 @@ def simulate_gw(
     assist_rate: float,
     max_goals: int = 10,
     max_card_prob: float = 0.95,
+    bonus_sim: str = "round",
+    bonus_link: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Simulate one GW. rows: one per player-fixture with ROW_COLUMNS; fixtures: FIXTURE_COLUMNS.
-    Returns arrays of shape (R, S): points, minutes, goals, assists, bonus, cs_points (0/1), goals_conceded;
-    and fixture_goals (fixtures, 2, S)."""
+    Returns arrays of shape (R, S): points, minutes, goals, assists, bonus, cs_points (0/1), goals_conceded,
+    saves, yellow_cards, red_cards, defensive_contribution; and fixture_goals (fixtures, 2, S).
+    bonus_link (bonus_sim "linked"): multipliers [element_type, min(goals, 2), min(assists, 2), CS]."""
     S = n_sims
     R = len(rows)
     rows = rows.reset_index(drop=True)
@@ -175,12 +247,24 @@ def simulate_gw(
     dc_hit = (rng.random((R, S)) < p_dc) & played
     dc = np.where(dc_hit, np.where(has_thr, thr, 0.0)[:, None], 0.0)
 
-    # 6. bonus: expectation for the bin, unbiased integer rounding
+    # 6. bonus: expectation for the bin -> integer (ModelConfig.bonus_sim)
     b = np.where(
         bins == 1, rows["bonus_short"].to_numpy(float)[:, None], rows["bonus_long"].to_numpy(float)[:, None]
     )
     b = np.where(played, np.clip(b, 0.0, 3.0), 0.0)
-    bonus = np.floor(b) + (rng.random((R, S)) < (b - np.floor(b)))
+    if bonus_sim not in ("round", "poisson", "linked"):
+        raise ValueError(f"unknown bonus_sim {bonus_sim!r}")
+    if bonus_sim == "poisson":
+        bonus = np.minimum(rng.poisson(b), 3) * played
+    else:
+        if bonus_sim == "linked":
+            link = np.ones((5, 3, 3, 2)) if bonus_link is None else bonus_link
+            et_idx = rows["element_type"].to_numpy(int)[:, None]
+            m = link[et_idx, np.minimum(g, 2), np.minimum(a, 2), cs.astype(np.int64)]
+            n_play = played.sum(axis=1, keepdims=True)
+            mean_m = np.where(played, m, 0.0).sum(axis=1, keepdims=True) / np.maximum(n_play, 1)
+            b = np.where(played, np.clip(b * m / np.where(mean_m > 0, mean_m, 1.0), 0.0, 3.0), 0.0)
+        bonus = np.floor(b) + (rng.random((R, S)) < (b - np.floor(b)))
 
     # 7. score with the rules engine
     et = np.broadcast_to(rows["element_type"].to_numpy(int)[:, None], (R, S))
@@ -195,6 +279,10 @@ def simulate_gw(
         "bonus": bonus,
         "cs_points": cs.astype(np.int64),
         "goals_conceded": gc,
+        "saves": saves,
+        "yellow_cards": yc.astype(np.int64),
+        "red_cards": rc.astype(np.int64),
+        "defensive_contribution": dc,
         "fixture_goals": goals,  # (fixtures, 2, S): home goals, away goals
     }
 

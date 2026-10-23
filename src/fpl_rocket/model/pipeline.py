@@ -9,7 +9,8 @@ Output (XPOutput):
               exp_assists, exp_bonus, exp_minutes, n_fixtures (0 = blank GW: everything 0), team,
               element_type,
               horizon (= gw - last finished GW: the age of the minutes features; 1 = the next GW when no
-              GW is in progress), penalties_order (bootstrap, live only; not used yet)
+              GW is in progress), penalties_order (bootstrap, live only; not used yet), low_history (bool:
+              fewer than ModelConfig.low_history_gws GWs of history in the training window; v0.2)
     sims      (element, gw, sim, points int8): the joint sample (N per element and GW)
     fixtures  two rows per fixture (team view): xg_for, xg_against, p_cs, p_gc_0..6 = the model
               fixture-difficulty grid
@@ -18,8 +19,11 @@ Output (XPOutput):
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -28,10 +32,11 @@ import numpy as np
 import pandas as pd
 
 from ..rules import CURRENT_SEASON, get_rules
-from .bonus import BonusModel, bonus_feature_frame
+from .bonus import BonusModel, bonus_feature_frame, bonus_link_table
 from .config import BACKTEST_CONFIG, DEFAULT_CONFIG, MODEL_BASE_VERSION, ModelConfig
-from .features import player_states
+from .features import low_history, player_states
 from .minutes import PLAYER_TYPES, MinutesModel, build_feature_rows, team_fixture_list
+from .newcomers import NewcomerPrior, price_band, shrink_to_band
 from .rates import PlayerRates
 from .simulate import aggregate, simulate_gw
 from .team_goals import DixonColes, NaiveGoals, results_from_rows, team_fixture_frame
@@ -55,6 +60,7 @@ XP_COLUMNS = (
     "exp_bonus",
     "exp_minutes",
     "penalties_order",
+    "low_history",
 )
 
 
@@ -113,6 +119,8 @@ class XPModel:
         self.minutes = MinutesModel(cfg)
         self.rates = PlayerRates(cfg)
         self.bonus = BonusModel(cfg)
+        self.newcomer = NewcomerPrior(cfg)
+        self.bonus_link = np.ones((5, 3, 3, 2))
         self.history: pd.DataFrame | None = None
         self.states: pd.DataFrame | None = None
         self.season = ""
@@ -140,6 +148,9 @@ class XPModel:
         t2 = time.perf_counter()
         self.rates.fit(h, season)
         self._fit_bonus(h, results)
+        self.newcomer = NewcomerPrior(self.cfg).fit(h)
+        played = h[pd.to_numeric(h["minutes"], errors="coerce").fillna(0) > 0]
+        self.bonus_link = bonus_link_table(played, self.cfg.bonus_link_pseudo_rows)
         t3 = time.perf_counter()
         self.timings = {"fit_team_goals_s": t1 - t0, "fit_minutes_s": t2 - t1, "fit_rates_bonus_s": t3 - t2}
         self.fitted_on = {
@@ -152,8 +163,17 @@ class XPModel:
             "bonus_training_rows": int(self.bonus.n_train),
             "promoted": self.dc.promoted,
             "dc_converged": self.dc.converged,
+            "newcomer_prior_rows": int(self.newcomer.n_newcomer_rows),
+            "defcon_positions_with_history": sorted(self.rates.dc_positions),
         }
         return self
+
+    def with_config(self, **changes: Any) -> XPModel:
+        """A shallow copy of this FITTED model whose prediction-time options (newcomer_fallback, bonus_sim,
+        defcon_fallback, n_sims, seed) differ; fitted components are shared, not refitted."""
+        other = copy.copy(self)
+        other.cfg = dataclasses.replace(self.cfg, **changes)
+        return other
 
     def _fit_bonus(self, h: pd.DataFrame, results: pd.DataFrame) -> None:
         fx = self.dc.fixture_frame(results[["season", "fixture", "home", "away"]].reset_index(drop=True))
@@ -188,6 +208,9 @@ class XPModel:
         rows = pd.concat(
             [rows.reset_index(drop=True), self.minutes.predict(rows).reset_index(drop=True)], axis=1
         )
+        n_hist, low = low_history(rows, self.history, cfg.low_history_gws)
+        rows["n_hist"], rows["low_history"] = n_hist.to_numpy(), low.to_numpy()
+        rows["price_band"] = price_band(rows.get("value"), cfg.price_band_edges, len(rows))
         fixtures = self.dc.fixture_frame(fixture_list(tg))
         fx = fixtures.set_index("fixture")
         home = rows["was_home"].astype(bool).to_numpy()
@@ -197,6 +220,13 @@ class XPModel:
         rows["p_cs_team"] = np.where(home, f.map(fx["p_cs_home"]), f.map(fx["p_cs_away"]))
         par = self.rates.params(rows)
         rows = pd.concat([rows, par], axis=1)
+        if cfg.defcon_fallback and self.season >= cfg.defcon_first_season:
+            # no DefCon counts for a position in the window (2025-26 GW1): the documented constant prior
+            missing = ~rows["element_type"].astype(int).isin(self.rates.dc_positions)
+            prior = rows["element_type"].astype(int).map(cfg.defcon_prior90).fillna(0.0)
+            rows.loc[missing, "dc90"] = prior[missing]
+        if cfg.newcomer_fallback == "prior":
+            rows = self.newcomer.apply(rows, self.history, self.rates, self.season)
         is_gk = rows["element_type"].astype(int).to_numpy() == 1
         rows["saves_mu90"] = np.where(
             is_gk, rows["saves90"] * rows["lam_against"] / max(self.rates.league_goals, 0.1), 0.0
@@ -231,11 +261,13 @@ class XPModel:
         seed: int | None = None,
         sims_frame: bool = True,
         players: pd.DataFrame | None = None,
+        on_gw: Callable[[pd.DataFrame, dict, np.ndarray], None] | None = None,
     ) -> XPOutput:
         """targets: player-fixture rows (season, gw, horizon, element, code, element_type, team, opponent,
-        was_home, fixture, kickoff_time [, status, chance_of_playing_next_round, penalties_order]).
-        players (optional): every player to report for every GW (element, element_type, team,
-        penalties_order); players without a fixture in a GW get a blank row (n_fixtures 0)."""
+        was_home, fixture, kickoff_time [, value, status, chance_of_playing_next_round, penalties_order]).
+        players (optional): every player to report for every GW (element, code, element_type, team,
+        penalties_order); players without a fixture in a GW get a blank row (n_fixtures 0).
+        on_gw (diagnostics): called per GW with (player-fixture rows, raw simulation dict, points (E, S))."""
         n = n_sims or self.cfg.n_sims
         rng = np.random.default_rng(self.cfg.seed if seed is None else seed)
         t0 = time.perf_counter()
@@ -254,8 +286,12 @@ class XPModel:
                 assist_rate=self.rates.assist_rate,
                 max_goals=self.cfg.dc_max_goals,
                 max_card_prob=self.cfg.max_card_prob,
+                bonus_sim=self.cfg.bonus_sim,
+                bonus_link=self.bonus_link,
             )
             summary, pts = aggregate(r, sim)
+            if on_gw is not None:
+                on_gw(r, sim, pts)
             summary["gw"] = int(gw)
             summaries.append(summary)
             if sims_frame:
@@ -272,15 +308,27 @@ class XPModel:
         t2 = time.perf_counter()
         xp = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame(columns=["element", "gw"])
         meta = rows.groupby(["element", "gw"], as_index=False).agg(
-            horizon=("horizon", "first"), team=("team", "first"), element_type=("element_type", "first")
+            horizon=("horizon", "first"),
+            team=("team", "first"),
+            element_type=("element_type", "first"),
+            low_history=("low_history", "first"),
+            n_hist=("n_hist", "first"),
+            price_band=("price_band", "first"),
         )
         if "penalties_order" in rows:
             pen = rows.groupby(["element", "gw"], as_index=False)["penalties_order"].first()
             meta = meta.merge(pen, on=["element", "gw"], how="left")
         xp = xp.merge(meta, on=["element", "gw"], how="left")
+        if self.cfg.newcomer_fallback == "shrink" and len(xp):
+            xp["xp"] = shrink_to_band(xp, self.cfg)
+        elif self.cfg.newcomer_fallback == "withhold" and len(xp):
+            xp.loc[xp["low_history"].astype(bool), ["xp", "p20", "p50", "p80"]] = np.nan
         sims = pd.concat(sim_frames, ignore_index=True) if sim_frames else None
         if players is not None and len(xp):
+            _, low = low_history(players, self.history, self.cfg.low_history_gws)
+            players = players.assign(low_history=low.to_numpy())
             xp, sims = _add_blanks(xp, sims, players, sorted(rows["gw"].unique()), rows, n)
+        xp["low_history"] = xp["low_history"].fillna(False).astype(bool)
         if "penalties_order" not in xp:
             xp["penalties_order"] = np.nan
         xp = xp[list(XP_COLUMNS)].sort_values(["gw", "element"], kind="stable").reset_index(drop=True)
@@ -313,6 +361,7 @@ def _add_blanks(
                         "team": p.team,
                         "element_type": p.element_type,
                         "penalties_order": getattr(p, "penalties_order", np.nan),
+                        "low_history": bool(getattr(p, "low_history", False)),
                         "n_fixtures": 0,
                     }
                 )
@@ -500,6 +549,8 @@ def bundle_targets(
                 players.get("chance_of_playing_next_round", pd.Series(np.nan, index=players.index))
             ),
             "penalties_order": _num(players.get("penalties_order", pd.Series(np.nan, index=players.index))),
+            # price (tenths): ONLY a prior for low-history players (ModelConfig.newcomer_fallback)
+            "value": _num(players.get("now_cost", pd.Series(np.nan, index=players.index))),
         }
     )
     pl["team"] = pl["team_id"].map(names)

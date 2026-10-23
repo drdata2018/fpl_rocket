@@ -14,6 +14,10 @@ The player's current team is the target row's team, so a transferred player's ab
 his NEW team's rate. assist_rate = FPL assists per team goal in the training rows (each goal is assisted
 with this probability in the simulation). Penalty takers: no special handling yet (TODO); penalties_order is
 passed through to the output.
+
+The raw weighted sums per player are kept (`sums`) so that a different prior can be applied later
+(reshrink: the low-history position x price-band prior; the DefCon prior of ModelConfig.defcon_prior90 when
+the training window holds no DefCon counts for a position - `dc_positions` lists those that do).
 """
 
 from __future__ import annotations
@@ -59,6 +63,8 @@ class PlayerRates:
     league_team_xa: float = 1.0
     league_goals: float = 1.4  # mean goals per team per match (saves scaling)
     assist_rate: float = 0.87
+    sums: pd.DataFrame = field(default_factory=pd.DataFrame)  # index pkey: w_xg w_xa ... wmin wmin_dc
+    dc_positions: set = field(default_factory=set)  # element types with DefCon counts in the window
 
     def fit(self, history: pd.DataFrame, season: str) -> PlayerRates:
         cfg = self.cfg
@@ -85,9 +91,11 @@ class PlayerRates:
         for k in RATE_STATS:
             pri[f"{k}90"] = pos[f"w_{k}"] / pos["wmin"].clip(lower=1e-9) * 90
         pri["dc90"] = (pos["w_dc"] / pos["wmin_dc"].where(pos["wmin_dc"] > 0)) * 90
+        self.dc_positions = {int(e) for e in pos.index[pos["wmin_dc"] > 0]}
         self.priors = pri.fillna({"dc90": 0.0}).fillna(0.0)
 
         per = h.groupby("pkey")[sums].sum()
+        self.sums = per
         etype = h.groupby("pkey")["element_type"].last().astype(int)
         out = pd.DataFrame(index=per.index)
         for k in RATE_STATS:
@@ -130,6 +138,20 @@ class PlayerRates:
             n_team_matches = h.dropna(subset=["fixture"]).groupby(["season", "fixture", "team"]).ngroups
             self.league_goals = float(goals / max(n_team_matches, 1))
         return self
+
+    def reshrink(
+        self, keys: pd.Series, stat: str, prior: pd.Series | np.ndarray, pseudo: float
+    ) -> np.ndarray:
+        """Per-90 rate of `stat` (xg, xa, saves, dc, ...) for players `keys` shrunk to a per-row `prior` with
+        `pseudo` minutes (a player without rows gets the prior)."""
+        prior = np.asarray(prior, dtype=float)
+        wmin_col = "wmin_dc" if stat == "dc" else "wmin"
+        if self.sums.empty:
+            return prior.copy()
+        num = keys.map(self.sums[f"w_{stat}"]).fillna(0.0).to_numpy(float)
+        den = keys.map(self.sums[wmin_col]).fillna(0.0).to_numpy(float)
+        tot = den + pseudo
+        return np.where(tot > 0, (num + prior * pseudo / 90) / np.where(tot > 0, tot, 1.0) * 90, prior)
 
     def params(self, targets: pd.DataFrame) -> pd.DataFrame:
         """Per target row (pkey via code/element, element_type, team): share_g, share_a and the per-90 rates

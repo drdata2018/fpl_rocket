@@ -21,6 +21,8 @@ match what was known at the deadline. Every number produced here is labelled acc
   prediction, scored with actual points; compared with the GW average: events[].average_entry_score of the
   current bootstrap for the current season, otherwise a PROXY from the archive (gw_average_proxy: 15 x the
   ownership-weighted mean points of all players that GW).
+* Every prediction row carries `low_history` (fewer than LOW_HISTORY_GWS GWs of rows for the player in the
+  fold's training window, cross-season `code`) and n_hist, for both predictors (model.features.low_history).
 * The matched-policy simulator (same start squad, budget, FT and chips; hits) is a stub until the planner.
 """
 
@@ -34,6 +36,8 @@ from typing import Protocol
 
 import numpy as np
 import pandas as pd
+
+from .model.features import low_history
 
 OUTCOME_COLUMNS = (
     "total_points",
@@ -85,6 +89,7 @@ FORMATION_MAX = {1: 1, 2: 5, 3: 5, 4: 3}
 XI_SIZE = 11
 MAX_PER_CLUB = 3
 PROXY_SQUAD = 15  # gw_average_proxy: an average squad of 15 owned players
+LOW_HISTORY_GWS = 3  # = ModelConfig.low_history_gws (model.features needs only numpy and pandas)
 
 
 @dataclass
@@ -334,12 +339,17 @@ def run_backtest(
         for name, detail in (getattr(predictor, "last_details", None) or {}).items():
             details.setdefault(name, []).append(detail)
         actual = tp["element"].map(fold.actuals()).fillna(0.0).astype(float)
+        n_hist, low = low_history(tp, fold.train, LOW_HISTORY_GWS)
         m = point_metrics(pred, actual)
         minutes = tp["element"].map(fold.target.groupby("element")["minutes"].sum()).fillna(0).astype(float)
         played = (minutes > 0).to_numpy()
         m["spearman_played"] = spearman(pred[played], actual[played])  # without the 0-minute mass
         frame = tp.assign(
-            pred=pred.to_numpy(float), actual=actual.to_numpy(float), minutes=minutes.to_numpy()
+            pred=pred.to_numpy(float),
+            actual=actual.to_numpy(float),
+            minutes=minutes.to_numpy(),
+            n_hist=n_hist.to_numpy(),
+            low_history=low.to_numpy(bool),
         )
         xi, cap = xi_points(frame)
         official = gw_averages.get((fold.season, fold.target_gw))
@@ -357,7 +367,18 @@ def run_backtest(
                 "train_rows": len(fold.train),
             }
         )
-        preds.append(frame[["season", "gw", "element", "element_type", "pred", "actual", "minutes"]])
+        cols = [
+            "season",
+            "gw",
+            "element",
+            "element_type",
+            "pred",
+            "actual",
+            "minutes",
+            "n_hist",
+            "low_history",
+        ]
+        preds.append(frame[cols])
     folds = pd.DataFrame(fold_rows)
     predictions = pd.concat(preds, ignore_index=True) if preds else pd.DataFrame()
     calib = []
