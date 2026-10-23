@@ -380,6 +380,18 @@ def test_bundle_model_outputs_and_manifest_fields(df, tmp_path):
     assert tables_back["xp_sims"]["points"].dtype == np.int8
 
 
+def test_bundle_simulates_4000_draws_by_default():
+    import inspect
+
+    from fpl_rocket.model.config import BUNDLE_CONFIG, BUNDLE_N_SIMS, DEFAULT_CONFIG
+
+    assert BUNDLE_N_SIMS == 4000 and BUNDLE_CONFIG.n_sims == 4000
+    # only the simulation count differs from the model's frozen hyperparameters
+    diff = {k for k, v in BUNDLE_CONFIG.as_dict().items() if DEFAULT_CONFIG.as_dict()[k] != v}
+    assert diff == {"n_sims"}
+    assert inspect.signature(run_bundle_model).parameters["cfg"].default is BUNDLE_CONFIG
+
+
 def test_model_predictor_runs_in_the_backtest_harness(df):
     small = df[df["gw"] <= 9]
     res = run_backtest(small, [SEASON2], ModelPredictor(FAST, n_sims=100))

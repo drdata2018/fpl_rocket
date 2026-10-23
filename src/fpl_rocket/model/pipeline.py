@@ -33,7 +33,7 @@ import pandas as pd
 
 from ..rules import CURRENT_SEASON, get_rules
 from .bonus import BonusModel, bonus_feature_frame, bonus_link_table
-from .config import BACKTEST_CONFIG, DEFAULT_CONFIG, MODEL_BASE_VERSION, ModelConfig
+from .config import BACKTEST_CONFIG, BUNDLE_CONFIG, DEFAULT_CONFIG, MODEL_BASE_VERSION, ModelConfig
 from .features import low_history, player_states
 from .minutes import PLAYER_TYPES, MinutesModel, availability_factor, build_feature_rows, team_fixture_list
 from .newcomers import NewcomerPrior, price_band, shrink_to_band
@@ -590,7 +590,7 @@ def run_bundle_model(
     *,
     season: str = CURRENT_SEASON,
     now: datetime | None = None,
-    cfg: ModelConfig = DEFAULT_CONFIG,
+    cfg: ModelConfig = BUNDLE_CONFIG,
     n_gws: int = 6,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Fit on archive (previous season) + bundle (current season) and predict the next n_gws GWs.

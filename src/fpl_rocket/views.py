@@ -644,8 +644,9 @@ def differentials(
     xp: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Players under an ownership threshold with descriptive columns. Default sort: total points desc.
-    `xp` (xp_next(): element, xp, p_play, low_history) adds the experimental one-GW columns xp_next / p_play
-    as display strings ("insufficient history" for low-history players)."""
+    `xp` (xp_next(): element, xp, xp3, p_play, low_history) adds the experimental columns xp_next (next GW),
+    xp_next3 (sum over the next 3 GWs) and p_play (a band) as display strings ("insufficient history" for
+    low-history players)."""
     df = players[players["ownership"] < max_ownership]
     if pos:
         df = df[df["pos"] == pos]
@@ -681,7 +682,7 @@ def differentials(
     ]
     if xp is not None:
         df = add_xp_columns(df, xp)
-        cols[cols.index("ppg") : cols.index("ppg")] = ["xp_next", "p_play"]
+        cols[cols.index("ppg") : cols.index("ppg")] = ["xp_next", "xp_next3", "p_play"]
     return df[cols].reset_index(drop=True)
 
 
@@ -689,14 +690,44 @@ def differentials(
 INSUFFICIENT = "insufficient history"
 
 
+XP_WINDOW = 3  # the longest public xP sum (decision 1, GW9): next GW and next 3 GWs; no 6-GW column anywhere
+P_PLAY_LABEL = "P(play)"
+# P(play) is shown as a band, never a percentage (decision 1): lower edges, highest first
+P_PLAY_BANDS: tuple[tuple[float, str], ...] = (
+    (0.9, "nailed"),
+    (0.7, "likely"),
+    (0.4, "rotation risk"),
+    (0.0, "doubtful"),
+)
+
+
 def xp_label(version: str | None) -> str:
     return f"xP next GW ({version or 'v?'}, experimental)"
 
 
+def xp3_label(version: str | None) -> str:
+    return f"xP next {XP_WINDOW} GWs ({version or 'v?'}, experimental, sum over listed fixtures)"
+
+
+def xp_window(xp: pd.DataFrame | None, next_gw: int | None, n: int = XP_WINDOW) -> list[int]:
+    """The GWs summed in "xP next n GWs": the first predicted GW >= next_gw and the n-1 calendar GWs after
+    it (never past GW38). Empty when the xP table does not cover every one of them."""
+    if xp is None or xp.empty:
+        return []
+    have = {int(g) for g in xp["gw"].unique()}
+    gws = sorted(g for g in have if next_gw is None or g >= int(next_gw))
+    if not gws:
+        return []
+    window = [g for g in range(gws[0], gws[0] + n) if g <= 38]
+    return window if set(window) <= have else []
+
+
 def xp_next(xp: pd.DataFrame, next_gw: int | None) -> pd.DataFrame:
     """One row per element for the first predicted GW >= next_gw: element, gw, xp, p_play, low_history
-    (a missing low_history column = all False). Only ONE-GW values are ever shown publicly."""
-    cols = ["element", "gw", "xp", "p_play", "low_history"]
+    (a missing low_history column = all False), plus xp3 = the sum of xp over xp_window(): a blank GW is a
+    row with n_fixtures 0 and xp 0, a double GW's row already holds both fixtures; NaN when the table does
+    not cover the window or the player has no row in it. Public display: next GW and next 3 GWs, never 6."""
+    cols = ["element", "gw", "xp", "p_play", "low_history", "xp3"]
     if xp is None or xp.empty:
         return pd.DataFrame(columns=cols)
     gws = sorted(int(g) for g in xp["gw"].unique() if next_gw is None or int(g) >= int(next_gw))
@@ -708,7 +739,14 @@ def xp_next(xp: pd.DataFrame, next_gw: int | None) -> pd.DataFrame:
     x["low_history"] = x["low_history"].fillna(False).astype(bool)
     if "p_play" not in x:
         x["p_play"] = float("nan")
-    return x[cols].drop_duplicates("element").reset_index(drop=True)
+    x = x.drop_duplicates("element")
+    window = xp_window(xp, next_gw)
+    if window:
+        w = xp[xp["gw"].isin(window)].drop_duplicates(["element", "gw"])
+        x["xp3"] = x["element"].map(w.groupby("element")["xp"].sum(min_count=1))
+    else:
+        x["xp3"] = float("nan")
+    return x[cols].reset_index(drop=True)
 
 
 def fmt_xp(value: Any, low_history: bool) -> str:
@@ -718,19 +756,27 @@ def fmt_xp(value: Any, low_history: bool) -> str:
     return "-" if v != v else f"{v:.2f}"
 
 
-def fmt_p_play(value: Any, low_history: bool) -> str:
-    if low_history:
-        return INSUFFICIENT
+def p_play_band(value: Any) -> str:
+    """nailed >= 0.9, likely 0.7-0.9, rotation risk 0.4-0.7, doubtful < 0.4; "-" when unknown."""
     v = _f(value, float("nan"))
-    return "-" if v != v else f"{100 * v:.0f}%"
+    if v != v:
+        return "-"
+    return next((label for edge, label in P_PLAY_BANDS if v >= edge), P_PLAY_BANDS[-1][1])
+
+
+def fmt_p_play(value: Any, low_history: bool) -> str:
+    """P(play) as a BAND (never a percentage); "insufficient history" for low-history players."""
+    return INSUFFICIENT if low_history else p_play_band(value)
 
 
 def add_xp_columns(df: pd.DataFrame, xpn: pd.DataFrame, id_col: str = "id") -> pd.DataFrame:
-    """df + xp_next / p_play display strings by player id ("-" when the model has no row)."""
+    """df + xp_next / xp_next3 / p_play display strings by player id ("-" when the model has no row)."""
     idx = xpn.set_index("element")
     out = df.copy()
     low = out[id_col].map(idx["low_history"]).fillna(False).astype(bool)
+    xp3 = idx["xp3"] if "xp3" in idx else pd.Series(dtype=float)
     out["xp_next"] = [fmt_xp(v, lo) for v, lo in zip(out[id_col].map(idx["xp"]), low, strict=True)]
+    out["xp_next3"] = [fmt_xp(v, lo) for v, lo in zip(out[id_col].map(xp3), low, strict=True)]
     out["p_play"] = [fmt_p_play(v, lo) for v, lo in zip(out[id_col].map(idx["p_play"]), low, strict=True)]
     return out
 
@@ -738,14 +784,15 @@ def add_xp_columns(df: pd.DataFrame, xpn: pd.DataFrame, id_col: str = "id") -> p
 def compare_xp_rows(
     players: pd.DataFrame, ids: list[int], xpn: pd.DataFrame, version: str | None
 ) -> pd.DataFrame:
-    """Two extra rows for the Compare table: one-GW xP and P(play), columns = the selected players."""
+    """Three extra rows for the Compare table: xP next GW, xP next 3 GWs and the P(play) band; columns =
+    the selected players."""
     idx = players.set_index("id")
     sub = add_xp_columns(pd.DataFrame({"id": ids}), xpn)
     data = {
-        f"{idx.at[pid, 'name']} ({idx.at[pid, 'team']})": [x, p]
-        for pid, x, p in zip(ids, sub["xp_next"], sub["p_play"], strict=True)
+        f"{idx.at[pid, 'name']} ({idx.at[pid, 'team']})": [x, x3, p]
+        for pid, x, x3, p in zip(ids, sub["xp_next"], sub["xp_next3"], sub["p_play"], strict=True)
     }
-    return pd.DataFrame(data, index=[xp_label(version), "P(play)"])
+    return pd.DataFrame(data, index=[xp_label(version), xp3_label(version), P_PLAY_LABEL])
 
 
 # --------------------------------------------------------------------------------------------- planner

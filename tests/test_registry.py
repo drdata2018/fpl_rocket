@@ -63,6 +63,7 @@ def _world():
         "next_deadline_time": "2026-10-30T11:00:00+00:00",
         "pre_deadline": True,
         "model_version": "v0.1-test",
+        "model_n_sims": 4000,
         "rules_version": "2026-27.1",
     }
     return pool, bootstrap, xp_df, state, baseline, manifest
@@ -104,6 +105,24 @@ def test_writer_records_plans_baseline_and_meta(built):
     )
     assert meta["deadline"] == "2026-10-30T11:00:00+00:00" and meta["rules_version"] == "2026-27.1"
     assert meta["roster"][0] == 7630179
+    assert meta["model_version"] == "v0.1-test" and meta["model_n_sims"] == 4000
+    assert set(meta["objectives"]) == {"model", "model_b", "model_c"} == set(plans["objectives"])
+
+
+def test_writer_records_objectives_a_b_and_c(built):
+    _, pool, _, _, plans, _ = built
+    ok = plans["entries"][0]
+    a, b, c = ok["model"], ok["model_b"], ok["model_c"]
+    assert a["settings"]["objective"] == "one_gw_no_transfers" and a["transfers_in"] == []
+    assert b["settings"]["objective"] == "one_gw_with_transfers"
+    assert c["settings"]["objective"] == "multi_gw" and c["settings"]["horizon"] == 5
+    for rec in (a, b, c):
+        assert rec["status"] in ("optimal", "fallback")
+        assert len(rec["xi"]) == 11 and len(rec["squad"]) == 15 and rec["captain"] in rec["xi"]
+        assert {"transfers_in", "transfers_out", "hits", "hit_cost", "path", "expected_total"} <= set(rec)
+        assert all(e in pool for e in rec["squad"])
+    assert len(c["path"]) == 2  # the xP covers GW1-2: the 5-GW horizon is cut to the predicted GWs
+    assert len(b["path"]) == 1 and len(b["transfers_in"]) == len(b["transfers_out"]) <= 2
 
 
 def test_reader_round_trip_and_checksum(built):
@@ -167,6 +186,13 @@ def test_scorer_rows_and_missing_weeks(built, tmp_path):
     assert e0["manager_pts"] == 61 and e0["squad_overlap"] == 15
     assert e0["captain_manager"] == ok["model"]["squad"][0]
     assert isinstance(e0["xi_model_pts"], int) and isinstance(e0["xi_baseline_pts"], int)
+    for tag in ("b", "c"):
+        sp = ok[f"model_{tag}"]
+        assert e0[f"transfers_{tag}"] == len(sp["transfers_in"]) and e0[f"hits_{tag}"] == sp["hits"]
+        assert isinstance(e0[f"xi_model_{tag}_pts"], int)
+    # (b) / (c) with no transfers score exactly like their line-up under the rules (net of 0 hits)
+    if not ok["model_b"]["transfers_in"] and ok["model_b"]["xi"] == ok["model"]["xi"]:
+        assert e0["xi_model_b_pts"] == e0["xi_model_pts"]
     assert rows[2]["reason"] == "manager picks unavailable"
     assert [r["status"] for r in rows[3:]] == ["error"] * 3
     # a week with no deadline release, and one whose release lacks registry assets: rows, never skipped

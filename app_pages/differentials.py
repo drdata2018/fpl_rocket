@@ -1,6 +1,6 @@
-"""Differentials: low-ownership players with descriptive columns, plus the EXPERIMENTAL one-GW xP and
-P(play) when the model bundle is available ("insufficient history" for newcomers). No recommendations;
-no multi-GW sums."""
+"""Differentials: low-ownership players with descriptive columns, plus the EXPERIMENTAL xP for the next GW
+and summed over the next 3 GWs, and the P(play) band, when the model bundle is available ("insufficient
+history" for newcomers). No recommendations; nothing beyond 3 GWs (decision 1, GW9)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from fpl_rocket import data, ui, views
 
 st.title("Differentials")
 st.info(
-    "Descriptive columns plus an experimental one-gameweek xP and P(play) (model backtested "
-    "retrospectively only). Low ownership, form and xP are not recommendations."
+    "Descriptive columns plus an experimental xP (next gameweek and next 3 gameweeks) and a P(play) band "
+    "(model backtested retrospectively only; its prospective record starts at the GW9 deadline). Low "
+    "ownership, form and xP are not recommendations."
 )
 
 players = boot = None
@@ -69,6 +70,7 @@ if players is not None:
             st.caption(f"xP columns unavailable: {model.get('reason') or 'no model bundle'}.")
         else:
             st.caption(
-                f"xP and P(play): experimental model {model.get('model_version')} (bundle "
-                f"{model.get('bundle_id')}), next gameweek only; hover the column headers for the caveats."
+                ui.model_caption(model)
+                + " xP for the next gameweek and summed over the next 3 (the first three gameweeks of the"
+                " fixture list); P(play) as a band. Hover the column headers for the caveats."
             )

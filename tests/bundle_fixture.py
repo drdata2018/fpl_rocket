@@ -5,7 +5,8 @@ fan-out is limited to those ids (the production build covers every player).
 
 with_xp=True adds a small deterministic xp.parquet (the model's table layout, next 3 GWs, every player) via
 the bundle's model hook: xP from the player's form and minutes, P(play) from status / minutes, low_history
-for players without minutes this season. It exists to exercise the app's xP paths offline, not the model.
+for players without minutes this season, plus a tiny xp_sims table (the model's simulation layout) that the
+app must never download. It exists to exercise the app's xP paths offline, not the model.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from fpl_rocket.api import FPLClient
@@ -60,7 +62,17 @@ def snapshot_xp_model(tables):
                     "model_version": XP_MODEL_VERSION,
                 }
             )
-    return {"xp": pd.DataFrame(rows)}, {"model_version": XP_MODEL_VERSION}
+    xp = pd.DataFrame(rows)
+    head = xp.head(20)
+    sims = pd.DataFrame(
+        {
+            "element": np.repeat(head["element"].to_numpy(), 4),
+            "gw": np.repeat(head["gw"].to_numpy(), 4).astype("int16"),
+            "sim": np.tile(np.arange(4, dtype=np.int16), len(head)),
+            "points": np.zeros(4 * len(head), dtype=np.int8),
+        }
+    )
+    return {"xp": xp, "xp_sims": sims}, {"model_version": XP_MODEL_VERSION, "model_n_sims": 4}
 
 
 def build_snapshot_bundle(out_dir: Path, now: datetime | None = None, *, with_xp: bool = False) -> Path:

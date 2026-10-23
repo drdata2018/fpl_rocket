@@ -1,5 +1,8 @@
 """Offline AppTest of the shadow planner and the experimental xP columns, on a fixture bundle with a small
-xp.parquet (tests/bundle_fixture.py, with_xp=True) and the recorded per-ID snapshot."""
+xp.parquet (tests/bundle_fixture.py, with_xp=True) and the recorded per-ID snapshot.
+
+Public setting (config.SHOW_SHADOW_PLANS False): the Model & Planner page shows the planning state and the
+registry, never a plan. The plan UI itself is still tested with the flag switched on (`plans_on`)."""
 
 from __future__ import annotations
 
@@ -10,13 +13,21 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from fpl_rocket import registry
+from fpl_rocket import config, data, registry
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = str(ROOT / "streamlit_app.py")
 SNAP = Path(__file__).parent / "fixtures" / "app_snapshot"
 TID = "7630179"
 PAGE = "app_pages/model_planner.py"
+PAGES = (
+    "app_pages/season_overview.py",
+    "app_pages/my_team.py",
+    "app_pages/compare_players.py",
+    "app_pages/differentials.py",
+    "app_pages/model_planner.py",
+)
+BANDS = {"nailed", "likely", "rotation risk", "doubtful", "insufficient history", "-"}
 
 
 @pytest.fixture(scope="module")
@@ -39,6 +50,12 @@ def offline(monkeypatch, tmp_path, xp_bundle):
     yield
     st.cache_data.clear()
     st.cache_resource.clear()
+
+
+@pytest.fixture()
+def plans_on(monkeypatch):
+    """The plan UI as it would render with config.SHOW_SHADOW_PLANS = True (not the public setting)."""
+    monkeypatch.setattr(config, "SHOW_SHADOW_PLANS", True)
 
 
 def _app(team_id: str | None = TID) -> AppTest:
@@ -73,10 +90,49 @@ def test_planner_needs_a_team_id_and_shows_registry_status():
     text = _texts(at)
     assert "Enter a team ID" in text
     assert "Prospective registry" in text and "No scores yet" in text
-    assert "Model v0.1-fixture" in text
+    assert f"first scored deadline is GW{registry.REGISTRY_START_GW}" in text
+    assert "Model v0.1-fixture" in text and "bundle " in text
 
 
-def test_shadow_plan_after_confirming_the_state():
+def test_public_page_never_renders_or_computes_a_plan(monkeypatch):
+    assert config.SHOW_SHADOW_PLANS is False  # the deployed setting
+
+    def boom(*a, **k):
+        raise AssertionError("a plan was computed with SHOW_SHADOW_PLANS False")
+
+    monkeypatch.setattr(data, "plan", boom)
+    monkeypatch.setattr(data, "chip_plans", boom)
+    at = _planner(_app())
+    text = _texts(at)
+    assert "Planning state" in text and "Confirm (or correct and confirm) the planning state." in text
+    assert "to see the plan" not in text
+    assert not any(b.label == "Confirm and plan" for b in at.button)
+    next(b for b in at.button if b.label == "Confirm").click()
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    text = _texts(at)
+    assert any("confirmed for this session" in s.value for s in at.success)
+    assert "How the planner is being tested" in text and "recorded as missing" in text
+    assert "Prospective registry" in text
+    for hidden in (
+        "plan: best XI",
+        "(b) Next GW",
+        "-GW horizon, decay",
+        "(d) Chips",
+        "Bench order",
+        "NOT VALIDATED",
+    ):
+        assert hidden not in text, hidden
+    assert not at.html, "no pitch is rendered"
+    assert not {"Captain", "Vice-captain", "Expected points (XI + captain)"} & {m.label for m in at.metric}
+    # edits are confirmed (session only) without a plan
+    at.number_input(key=f"ps_bank_{TID}").set_value(9.9)
+    next(b for b in at.button if b.label == "Confirm").click()
+    at.run()
+    assert any("user-edited: bank 9.9" in s.value for s in at.success)
+
+
+def test_shadow_plan_after_confirming_the_state(plans_on):
     at = _planner(_app())
     text = _texts(at)
     assert "Planning state" in text and "Confirm (or correct and confirm)" in text
@@ -91,10 +147,10 @@ def test_shadow_plan_after_confirming_the_state():
     assert "Bench" in pitch and ">C<" in pitch and ">VC<" in pitch
     assert "bundle " in text and "v0.1-fixture" in text
     # the experimental section is collapsed: nothing multi-GW is computed or shown
-    assert "(c)" not in text and not at.warning
+    assert "-GW horizon, decay" not in text and not at.warning
 
 
-def test_user_edits_are_stamped_in_the_explanation():
+def test_user_edits_are_stamped_in_the_explanation(plans_on):
     at = _planner(_app())
     at.number_input(key=f"ps_bank_{TID}").set_value(9.9)
     _confirm(at)
@@ -106,7 +162,7 @@ def test_user_edits_are_stamped_in_the_explanation():
     assert "plan: best XI" not in _texts(at)
 
 
-def test_experimental_section_shows_shadow_plans():
+def test_experimental_section_shows_shadow_plans(plans_on):
     at = _planner(_app())
     _confirm(at)
     at.session_state["planner_exp_open"] = True
@@ -158,27 +214,80 @@ def test_registry_scores_are_read_and_summarised(tmp_path, monkeypatch):
     text = _texts(at)
     assert "Last scored: **GW9**" in text or "Last scored: GW9" in text
     assert {"xP RMSE (model)", "RMSE (baseline)"} <= {m.label for m in at.metric}
+    means = at.dataframe[0].value
+    assert means.at["Line-up: planner (a), no transfers", "mean points"] == 60
+    assert pd.isna(means.at["Line-up: planner (b), with transfers, net of hits", "mean points"])
 
 
-def test_differentials_and_compare_show_one_gw_xp_only():
+def test_differentials_and_compare_show_next_gw_and_3_gw_xp_and_bands():
     at = _app()
     at.switch_page("app_pages/differentials.py")
     at.run()
     assert not at.exception, [e.value for e in at.exception]
     df = at.dataframe[0].value
-    assert {"xp_next", "p_play"} <= set(df.columns)
+    assert {"xp_next", "xp_next3", "p_play"} <= set(df.columns)
+    assert not [c for c in df.columns if "6" in str(c)]
     assert (df["xp_next"] == "insufficient history").any()
     assert not (df["p_play"].eq("insufficient history") ^ df["xp_next"].eq("insufficient history")).any()
-    assert "experimental model v0.1-fixture" in _texts(at)
+    assert set(df["p_play"]) <= BANDS and not df["p_play"].str.contains("%").any()
+    ok = df[df["xp_next"].ne("insufficient history") & df["xp_next"].ne("-")]
+    assert len(ok) and (ok["xp_next3"].astype(float) >= ok["xp_next"].astype(float)).all()  # 3 single GWs
+    text = _texts(at)
+    assert "experimental model v0.1-fixture" in text and "bundle " in text
     at.switch_page("app_pages/compare_players.py")
     at.run()
     assert not at.exception, [e.value for e in at.exception]
     table = at.dataframe[0].value
     assert "xP next GW (v0.1, experimental)" in table.index and "P(play)" in table.index
-    assert not any("3" in str(i) and "GW" in str(i) and "sum" in str(i).lower() for i in table.index)
+    assert "xP next 3 GWs (v0.1, experimental, sum over listed fixtures)" in table.index
+    assert not any("6" in str(i) for i in table.index)
+    assert set(table.loc["P(play)"]) <= BANDS
+    text = _texts(at)
+    assert "experimental model v0.1-fixture" in text and "bundle " in text
+    assert "calibration is still being measured" in text
 
 
-def test_two_sessions_keep_their_own_planning_state():
+def test_app_never_downloads_the_simulations(xp_bundle, monkeypatch):
+    names = {f.name for f in Path(xp_bundle).iterdir()}
+    assert "xp_sims.parquet" in names  # the fixture release has them, like the real one
+    assert "xp_sims.parquet" not in data.APP_ASSETS and "xp_fixtures.parquet" not in data.APP_ASSETS
+    with pytest.raises(ValueError, match="not an app asset"):
+        data._read(str(xp_bundle), "xp_sims.parquet", "x")
+    seen: list[str] = []
+    real = data._read
+
+    def spy(source, name, bundle_id=None):
+        seen.append(name)
+        return real(source, name, bundle_id)
+
+    monkeypatch.setattr(data, "_read", spy)
+    at = _app()
+    for page in PAGES:
+        at.switch_page(page)
+        at.run()
+        assert not at.exception, (page, [e.value for e in at.exception])
+    assert "xp.parquet" in seen and "manifest.json" in seen
+    assert set(seen) <= set(data.APP_ASSETS) and "xp_sims.parquet" not in seen
+
+
+def test_pages_render_when_the_solver_cannot_be_imported(monkeypatch):
+    import sys
+
+    for mod in [m for m in sys.modules if m.startswith("fpl_rocket.planner")]:
+        monkeypatch.delitem(sys.modules, mod)
+    monkeypatch.setitem(sys.modules, "pulp", None)  # "import pulp" raises ImportError
+    monkeypatch.setitem(sys.modules, "highspy", None)
+    at = _app()
+    for page in PAGES:
+        at.switch_page(page)
+        at.run()
+        assert not at.exception, (page, [e.value for e in at.exception])
+    text = _texts(at)  # the Model & Planner page, last
+    assert "Planning state" in text and "Prospective registry" in text
+    assert "solver is not available on this host" in text
+
+
+def test_two_sessions_keep_their_own_planning_state(plans_on):
     a, b = _planner(_app()), _planner(_app("1000001"))
     a.number_input(key=f"ps_bank_{TID}").set_value(9.9)
     _confirm(a)

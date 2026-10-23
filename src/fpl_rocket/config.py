@@ -20,3 +20,9 @@ RELEASES_URL = "https://github.com/drdata2018/fpl_rocket/releases"
 MANIFEST_TTL_S = 300  # how long a fetched manifest (or a failed fetch) is reused
 BUNDLE_MAX_AGE_H = 12  # an older bundle (publication stalled) is ignored: live API fallback
 BUNDLE_TIMEOUT_S = (5.0, 20.0)
+
+# Model & Planner page (decision 1, GW9): the planner runs in SHADOW mode. Its proposals (a) best XI and
+# captain, (b) next GW with transfers and (c) the multi-GW path are recorded for a fixed roster before every
+# deadline and scored afterwards by the prospective registry (fpl_rocket.registry); none of (a)-(d) (d = chip
+# scenarios) is shown to users. True re-enables the existing plan UI of app_pages/model_planner.py unchanged.
+SHOW_SHADOW_PLANS = False

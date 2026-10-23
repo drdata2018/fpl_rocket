@@ -8,10 +8,15 @@
 # element_history is older than 6 h, a GW has finished since, or there is no previous release; otherwise it is
 # reused (manifest: element_history_source = fetched | reused:<bundle_id>).
 # The xP model (fpl_rocket.model, dependency group "model") is fitted here on the archived previous season
-# (cached) + the current season from the bundle; the app does not read xp yet.
+# (cached) + the current season from the bundle, N = 4000 joint simulations (model.config.BUNDLE_N_SIMS). The
+# app reads xp.parquet only (next GW and next-3-GW sums, P(play) bands), never xp_sims / xp_fixtures.
+# Availability news (fpl_rocket.news) is on by default in build_bundle.py (--no-news turns it off).
 # Prospective registry (fpl_rocket.registry): for the pre-deadline bundle, scripts/registry_write.py adds
 # registry_xp.parquet / registry_plans.json / registry_meta.json to the deadline-gw<N> release (scored later
-# by registry_score.yml); if it fails, the release is published without them and the week scores as missing.
+# by registry_score.yml): the xp table as issued and the shadow planner's objectives (a), (b), (c) for the
+# roster. The step runs AFTER bundle-<id> is published, only for the pre-deadline bundle, with
+# continue-on-error and its own timeout: if it fails, deadline-gw<N> is published without the registry files
+# and the week scores as missing.
 # Releases are created as drafts, filled with every asset, then published, so readers never see a release
 # without its files. Retention: bundle-* releases and tags older than 48 hours are deleted; deadline-* never.
 name: bundle
@@ -81,6 +86,7 @@ jobs:
         id: registry
         if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
         continue-on-error: true
+        timeout-minutes: 8
         env:
           DIR: ${{ steps.build.outputs.path }}
         run: uv run --no-sync python scripts/registry_write.py --bundle "$DIR" --out data/registry --archive data/archive/all_gws.parquet

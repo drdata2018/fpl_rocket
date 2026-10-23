@@ -1,6 +1,7 @@
 """FPL Rocket - Streamlit Community Cloud entry point: navigation, sidebar (team ID), timestamps.
 
-Pages live in app_pages/. Community Cloud installs requirements.txt only (not the package), so src/ and
+Pages live in app_pages/ (all but hosting_spike.py are in the navigation). Community Cloud installs
+requirements.txt only (not the package), so src/ and
 scripts/ are put on sys.path here before any page imports fpl_rocket.
 """
 
@@ -33,8 +34,9 @@ PAGES = [
     ),
     st.Page(ROOT / "app_pages" / "differentials.py", title="Differentials", icon=":material/filter_alt:"),
     st.Page(ROOT / "app_pages" / "model_planner.py", title="Model & Planner", icon=":material/construction:"),
-    st.Page(ROOT / "app_pages" / "hosting_spike.py", title="Hosting spike", icon=":material/dns:"),
 ]
+# app_pages/hosting_spike.py (the day-1 hosting probe) is kept for diagnosing the host but is no longer in the
+# public navigation: it calls the FPL API from the server on every visit. Add it back here when needed.
 
 page = st.navigation(PAGES)
 footer = ui.sidebar()

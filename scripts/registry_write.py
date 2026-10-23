@@ -5,8 +5,10 @@ Usage: uv run python scripts/registry_write.py --bundle data/bundles/<id> --out 
 
 Reads the bundle's files (sha256-checked against its manifest), computes the frozen baseline's xP for the next
 GW (form per 90 x availability on the bundle's current season + the archived previous season), rebuilds the
-public planning state of every roster entry from the FPL API (bootstrap and round prices from the bundle) and
-writes registry_xp.parquet, registry_plans.json and registry_meta.json to --out. The bundle workflow uploads
+public planning state of every roster entry from the FPL API (bootstrap and round prices from the bundle),
+solves the shadow planner's objectives (a), (b) and (c) for each (fpl_rocket.registry.PLAN_KEYS) and writes
+registry_xp.parquet (the xp table AS ISSUED; the simulations are not needed), registry_plans.json and
+registry_meta.json (model_version, model_n_sims) to --out. The bundle workflow uploads
 them into the deadline-gw<N> release. Needs the `model` dependency group (bundle_history_rows/bundle_targets).
 """
 
@@ -91,7 +93,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     paths = registry.write_files(args.out, reg_xp, plans, meta)
     ok = sum(1 for e in plans["entries"] if e["status"] == "ok")
-    print(f"registry GW{gw} bundle {manifest['bundle_id']}: {ok}/{len(plans['entries'])} entries planned")
+    print(
+        f"registry GW{gw} bundle {manifest['bundle_id']} model {meta['model_version']} "
+        f"(N={meta['model_n_sims']}): {ok}/{len(plans['entries'])} entries planned"
+    )
+    for e in plans["entries"]:
+        st = {k: (e.get(k) or {}).get("status", "-") for k in registry.PLAN_KEYS}
+        print(f"  entry {e['entry_id']}: {e['status']} {st if e['status'] == 'ok' else e.get('error')}")
     for p in paths:
         print(f"  {p} ({p.stat().st_size:,} bytes)")
     return 0

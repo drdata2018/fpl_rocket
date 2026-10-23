@@ -4,17 +4,23 @@ WRITE (bundle workflow, pre-deadline bundle only; scripts/registry_write.py): ne
 release `deadline-gw<N>` (the scored snapshot: the bundle created 30-90 min before the deadline):
     registry_xp.parquet   the xp table AS ISSUED (+ bundle_id, issued_gw, and `baseline_xp` = the frozen
                           baseline's prediction for GW N: form per 90 x availability)
-    registry_plans.json   objective (a) (next GW, no transfers) for a fixed roster of entry ids computed from
-                          their public planning state at that moment, with the model xP; plus the baseline's
-                          XI / captain for the same squads
-    registry_meta.json    deadline, created_at, bundle id/time, model_version, rules_version, exclusions
-                          (low_history count, players without xP), roster, sha256 of the two other files
+    registry_plans.json   for a fixed roster of entry ids, from their public planning state at that moment
+                          and the model xP, the shadow planner's proposals for objectives
+                          (a) next GW, no transfers                       -> entries[].model
+                          (b) next GW with up to 2 transfers, hits allowed -> entries[].model_b
+                          (c) 5-GW horizon, decay 0.85, FT banking, hits   -> entries[].model_c
+                          (the app's default settings); plus the baseline's (a) for the same squads
+    registry_meta.json    deadline, created_at, bundle id/time, model_version, model_n_sims, rules_version,
+                          objectives, exclusions (low_history count, players without xP), roster, sha256 of
+                          the two other files
 
 SCORE (scripts/registry_score.py, daily workflow registry_score.yml): once GW N is finished and checked,
 download the deadline-gw<N> assets and score: xP RMSE / Spearman vs actual points (all players and players
 who played) for the model and the baseline; per roster entry: captain pick points vs the best captain
 available in the squad and vs the manager's ACTUAL captain, planned XI points (automatic substitutions,
-armband) vs the manager's actual GW points. Rows are appended to registry_scores.csv on the `spike-log`
+armband) vs the manager's actual GW points; for (b) and (c) the realised points of the plan's FIRST GW
+(after its transfers, automatic substitutions, armband) net of that GW's hit cost, with the transfers and hits
+it made. Rows are appended to registry_scores.csv on the `spike-log`
 branch. A week is NEVER skipped: no deadline release, or a release without registry assets, gives a row with
 status=missing.
 """
@@ -35,7 +41,9 @@ import requests
 
 from .backtest import spearman
 from .config import PLACEHOLDER_TEAM_ID, RELEASES_URL
-from .planner.lineup import realised_points
+
+# NOTE: the planner (PuLP + HiGHS) is imported lazily, so the app can read the scores (latest_scores, the
+# constants) on a host where the solver cannot be installed.
 
 JSON = dict[str, Any]
 
@@ -78,7 +86,20 @@ SCORE_COLUMNS = (
     "manager_pts",
     "manager_chip",
     "squad_overlap",
+    # (b) next GW with transfers, (c) multi-GW: first-GW realised points net of hits, transfers, hits
+    "xi_model_b_pts",
+    "transfers_b",
+    "hits_b",
+    "xi_model_c_pts",
+    "transfers_c",
+    "hits_c",
 )
+# the planner objectives recorded per roster entry: plans key -> (objective, description)
+PLAN_KEYS = {
+    "model": "(a) next GW, no transfers",
+    "model_b": "(b) next GW, up to 2 transfers, 4-point hits allowed",
+    "model_c": "(c) 5-GW horizon, decay 0.85, up to 2 transfers per GW, FT banking, 4-point hits",
+}
 
 
 def deadline_tag(gw: int) -> str:
@@ -95,17 +116,38 @@ def _sha(data: bytes) -> str:
 
 # ============================================================================================ write
 def _plan_record(plan: Any) -> JSON:
+    """The plan's FIRST GW (what would be executed before the deadline) + the path of a multi-GW plan."""
     gp = plan.first()
     return {
         "status": plan.status,
         "reason": plan.reason,
+        "settings": plan.settings,
         "gw": gp.gw,
         "squad": gp.squad,
         "xi": gp.xi,
         "captain": gp.captain,
         "vice": gp.vice,
         "bench": gp.bench,
+        "transfers_out": gp.transfers_out,
+        "transfers_in": gp.transfers_in,
+        "free_transfers": gp.free_transfers,
+        "hits": gp.hits,
+        "hit_cost": gp.hit_cost,
+        "chip": gp.chip,
         "expected_points": round(gp.expected_points, 3),
+        "expected_total": round(plan.expected_total, 3),
+        "path": [
+            {
+                "gw": g.gw,
+                "transfers_out": g.transfers_out,
+                "transfers_in": g.transfers_in,
+                "hits": g.hits,
+                "captain": g.captain,
+                "chip": g.chip,
+                "expected_points": round(g.expected_points, 3),
+            }
+            for g in plan.gws
+        ],
         "explanation": plan.explanation,
         "warnings": plan.warnings,
     }
@@ -138,7 +180,14 @@ def build_registry(
 
     states: {entry_id: PlanningState} for the roster ids that could be built; errors: {entry_id: reason}."""
     from . import views
-    from .planner import ONE_GW_NO_TRANSFERS, PlanSettings, from_planning_state, solve
+    from .planner import (
+        MULTI_GW,
+        ONE_GW_NO_TRANSFERS,
+        ONE_GW_WITH_TRANSFERS,
+        PlanSettings,
+        from_planning_state,
+        solve,
+    )
 
     errors = dict(errors or {})
     gw = int(manifest.get("next_event") or min(int(g) for g in xp["gw"].unique()))
@@ -162,13 +211,23 @@ def build_registry(
         st = states[entry_id]
         try:
             settings = PlanSettings(objective=ONE_GW_NO_TRANSFERS)
-            model_plan = solve(
-                from_planning_state(st, players, xp[xp["gw"] == gw], bootstrap=bootstrap), settings
-            )
+            one_gw = from_planning_state(st, players, xp[xp["gw"] == gw], bootstrap=bootstrap)
+            model_plan = solve(one_gw, settings)
             base_plan = solve(from_planning_state(st, players, base_df, bootstrap=bootstrap), settings)
         except Exception as exc:  # noqa: BLE001 - one entry must not sink the registry
             entries.append({"entry_id": entry_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
             continue
+        shadow: JSON = {}
+        for key, objective in (("model_b", ONE_GW_WITH_TRANSFERS), ("model_c", MULTI_GW)):
+            try:
+                inp = (
+                    one_gw
+                    if objective == ONE_GW_WITH_TRANSFERS
+                    else from_planning_state(st, players, xp[xp["gw"] >= gw], bootstrap=bootstrap)
+                )
+                shadow[key] = _plan_record(solve(inp, PlanSettings(objective=objective)))
+            except Exception as exc:  # noqa: BLE001 - (a) is still recorded and scored
+                shadow[key] = {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
         entries.append(
             {
                 "entry_id": entry_id,
@@ -183,10 +242,11 @@ def build_registry(
                     "warnings": len(st.warnings),
                 },
                 "model": _plan_record(model_plan),
+                **shadow,
                 "baseline": _plan_record(base_plan),
             }
         )
-    plans = {"bundle_id": str(manifest["bundle_id"]), "gw": gw, "entries": entries}
+    plans = {"bundle_id": str(manifest["bundle_id"]), "gw": gw, "objectives": PLAN_KEYS, "entries": entries}
     gw_xp = reg_xp[reg_xp["gw"] == gw]
     meta = {
         "gw": gw,
@@ -196,7 +256,9 @@ def build_registry(
         "bundle_created_at": manifest.get("created_at"),
         "pre_deadline": bool(manifest.get("pre_deadline")),
         "model_version": manifest.get("model_version"),
+        "model_n_sims": manifest.get("model_n_sims"),
         "rules_version": manifest.get("rules_version"),
+        "objectives": PLAN_KEYS,
         "baseline": BASELINE_NAME,
         "roster": list(REGISTRY_ENTRY_IDS),
         "exclusions": {
@@ -279,6 +341,8 @@ def score_gw(
     bootstrap: JSON,
 ) -> list[JSON]:
     """Score one GW (pure). live = event/{gw}/live; picks = {entry_id: entry picks of GW gw}."""
+    from .planner.lineup import realised_points
+
     stats = {int(e["id"]): e.get("stats", {}) for e in live.get("elements", [])}
     pts = {e: int(s.get("total_points", 0) or 0) for e, s in stats.items()}
     mins = {e: int(s.get("minutes", 0) or 0) for e, s in stats.items()}
@@ -333,6 +397,14 @@ def score_gw(
                 "points"
             ],
         )
+        for key, tag in (("model_b", "b"), ("model_c", "c")):
+            sp = e.get(key)
+            if not sp or not sp.get("xi"):
+                continue
+            real = realised_points(sp["xi"], sp["bench"], sp["captain"], sp["vice"], pts, mins, et)
+            row[f"xi_model_{tag}_pts"] = int(real["points"]) - int(sp.get("hit_cost") or 0)
+            row[f"transfers_{tag}"] = len(sp.get("transfers_in") or [])
+            row[f"hits_{tag}"] = int(sp.get("hits") or 0)
         pk = picks.get(eid)
         if pk:
             cap = next((int(p["element"]) for p in pk.get("picks", []) if p.get("is_captain")), None)

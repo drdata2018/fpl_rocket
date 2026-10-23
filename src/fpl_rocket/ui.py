@@ -300,22 +300,39 @@ def pitch_html(rows: dict[str, list[dict[str, Any]]], points_label: str) -> str:
 
 # ============================================================================================ model (xP)
 XP_HELP = (
-    "EXPERIMENTAL xP model {version}: mean expected points for the NEXT gameweek only. Validated by a "
-    "retrospective backtest only (no prospective record yet); not advice. 'insufficient history' = a "
-    "newcomer whose prediction is unreliable."
+    "EXPERIMENTAL xP model {version}: mean expected points for the NEXT gameweek. Validated by a "
+    "retrospective backtest only (the prospective record starts at the GW9 deadline); not advice. "
+    "'insufficient history' = a newcomer whose prediction is unreliable."
+)
+XP3_HELP = (
+    "EXPERIMENTAL xP model {version}: sum of the mean expected points over the player's fixtures in the next "
+    "3 gameweeks (the first three gameweeks of the fixture list). A blank gameweek adds 0; a double gameweek "
+    "counts both fixtures. Not advice."
+)
+P_PLAY_HELP = (
+    "Model estimate, experimental; this season's calibration is still being measured. Bands for the next "
+    "gameweek: nailed >= 90%, likely 70-90%, rotation risk 40-70%, doubtful < 40%."
 )
 
 
 def xp_columns(version: str | None) -> dict[str, Any]:
-    """Column config for the experimental one-GW xP / P(play) display columns."""
+    """Column config for the experimental xP (next GW, next 3 GWs) and P(play) band display columns."""
     from . import views
 
     return {
         "xp_next": st.column_config.TextColumn(
             views.xp_label(version), help=XP_HELP.format(version=version or "")
         ),
-        "p_play": st.column_config.TextColumn(
-            "P(play)",
-            help="Probability of playing any minutes next gameweek (experimental model, same caveats as xP).",
+        "xp_next3": st.column_config.TextColumn(
+            views.xp3_label(version), help=XP3_HELP.format(version=version or "")
         ),
+        "p_play": st.column_config.TextColumn(views.P_PLAY_LABEL, help=P_PLAY_HELP),
     }
+
+
+def model_caption(model: dict[str, Any], what: str = "xP and P(play)") -> str:
+    """The provenance caption every table or page with model numbers carries: model_version + bundle_id."""
+    return (
+        f"{what}: experimental model {model.get('model_version') or '?'} · "
+        f"bundle {model.get('bundle_id') or '?'} (created {fmt_ts(model.get('created_at'))})."
+    )

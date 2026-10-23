@@ -241,3 +241,10 @@ class ModelConfig:
 
 DEFAULT_CONFIG = ModelConfig()
 BACKTEST_CONFIG = ModelConfig(horizons=(1,))
+
+# The hourly bundle (run_bundle_model) simulates N = 4000 joint draws per player and GW (step 3f, decided from
+# the decision-level diagnostics: Monte Carlo noise in the p20 / p50 / p80 quantiles and the plan objective is
+# negligible at 4000). A run setting, not a model hyperparameter: the fitted components and the mean xP are
+# unchanged, so MODEL_BASE_VERSION stays; the manifest records model_n_sims and the registry meta copies it.
+BUNDLE_N_SIMS = 4000
+BUNDLE_CONFIG = ModelConfig(n_sims=BUNDLE_N_SIMS)

@@ -301,3 +301,74 @@ def test_gw_frame_joins_average():
 def test_parse_team_id(raw, ok):
     tid, err = parse_team_id(raw)
     assert (tid is not None) is ok and (err is None) is ok
+
+
+# --------------------------------------------------------------------------------------------- xP display
+@pytest.mark.parametrize(
+    "p, band",
+    [
+        (1.0, "nailed"),
+        (0.9, "nailed"),
+        (0.899, "likely"),
+        (0.7, "likely"),
+        (0.69, "rotation risk"),
+        (0.4, "rotation risk"),
+        (0.39, "doubtful"),
+        (0.0, "doubtful"),
+        (float("nan"), "-"),
+        (None, "-"),
+    ],
+)
+def test_p_play_is_shown_as_a_band_never_a_percentage(p, band):
+    assert views.fmt_p_play(p, False) == band
+    assert views.fmt_p_play(p, True) == views.INSUFFICIENT
+    assert "%" not in views.fmt_p_play(p, False)
+
+
+def _xp_rows(rows):
+    return pd.DataFrame(rows, columns=["element", "gw", "xp", "p_play", "n_fixtures", "low_history"])
+
+
+def test_xp_next3_sums_listed_fixtures_blank_is_zero_double_counts_both():
+    xp = _xp_rows(
+        [
+            # element 1: single, blank (row with 0 fixtures and xp 0), double
+            (1, 9, 4.0, 0.95, 1, False),
+            (1, 10, 0.0, 0.0, 0, False),
+            (1, 11, 9.5, 0.95, 2, False),
+            (1, 12, 5.0, 0.95, 1, False),  # GW12 is outside the 3-GW window
+            # element 2: low history
+            (2, 9, 1.0, 0.5, 1, True),
+            (2, 10, 1.0, 0.5, 1, True),
+            (2, 11, 1.0, 0.5, 1, True),
+            # element 3: no row in GW10 (treated as 0, the player has rows in the window)
+            (3, 9, 2.0, 0.75, 1, False),
+            (3, 11, 3.0, 0.75, 1, False),
+        ]
+    )
+    assert views.xp_window(xp, 9) == [9, 10, 11]
+    xpn = views.xp_next(xp, 9).set_index("element")
+    assert xpn.at[1, "xp3"] == pytest.approx(13.5) and xpn.at[3, "xp3"] == pytest.approx(5.0)
+    shown = views.add_xp_columns(pd.DataFrame({"id": [1, 2, 3, 4]}), views.xp_next(xp, 9))
+    assert list(shown["xp_next"]) == ["4.00", views.INSUFFICIENT, "2.00", "-"]
+    assert list(shown["xp_next3"]) == ["13.50", views.INSUFFICIENT, "5.00", "-"]
+    assert list(shown["p_play"]) == ["nailed", views.INSUFFICIENT, "likely", "-"]
+
+
+def test_xp_window_needs_full_coverage_and_stops_at_gw38():
+    xp = _xp_rows([(1, 9, 1.0, 1.0, 1, False), (1, 10, 1.0, 1.0, 1, False)])
+    assert views.xp_window(xp, 9) == []  # GW11 not predicted: no 3-GW column values
+    assert views.xp_next(xp, 9)["xp3"].isna().all()
+    end = _xp_rows([(1, 37, 1.0, 1.0, 1, False), (1, 38, 2.0, 1.0, 1, False)])
+    assert views.xp_window(end, 37) == [37, 38]
+    assert views.xp_next(end, 37)["xp3"].iloc[0] == pytest.approx(3.0)
+
+
+def test_no_six_gw_xp_column_anywhere():
+    assert views.XP_WINDOW == 3
+    assert "3 GWs" in views.xp3_label("v0.2.1") and "sum over listed fixtures" in views.xp3_label("v0.2.1")
+    xp = _xp_rows([(1, g, 1.0, 1.0, 1, False) for g in range(9, 15)])
+    players = pd.DataFrame({"id": [1], "name": ["A"], "team": ["ARS"]})
+    rows = views.compare_xp_rows(players, [1], views.xp_next(xp, 9), "v0.2.1")
+    assert list(rows.index) == [views.xp_label("v0.2.1"), views.xp3_label("v0.2.1"), "P(play)"]
+    assert rows.iloc[1, 0] == "3.00"  # 3 GWs, not the 6 predicted

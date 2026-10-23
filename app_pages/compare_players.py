@@ -1,4 +1,5 @@
-"""Compare Players: 2-4 players side by side, per-GW points, 5-GW fixture strip (FPL difficulty)."""
+"""Compare Players: 2-4 players side by side, per-GW points, 5-GW fixture strip (FPL difficulty), plus the
+EXPERIMENTAL xP (next GW, next 3 GWs) and P(play) band rows when the model bundle is available."""
 
 from __future__ import annotations
 
@@ -39,7 +40,13 @@ if players is not None:
             st.dataframe(table)
             st.caption("Ownership = selected_by_percent. Defensive contribution is the raw season count.")
             if model.get("available"):
-                st.caption(ui.XP_HELP.format(version=model.get("model_version") or ""))
+                st.caption(ui.model_caption(model))
+                st.caption(
+                    ui.XP_HELP.format(version=model.get("model_version") or "")
+                    + " "
+                    + ui.XP3_HELP.format(version=model.get("model_version") or "")
+                )
+                st.caption(f"P(play): {ui.P_PLAY_HELP}")
             else:
                 st.caption(f"xP rows unavailable: {model.get('reason') or 'no model bundle'}.")
 

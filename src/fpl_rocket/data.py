@@ -110,11 +110,21 @@ def _is_remote(source: str) -> bool:
     return source.startswith(("https://", "http://"))
 
 
+XP_FILE = "xp.parquet"  # the model's table read by the app (section "model (xP)" below)
+# EVERY bundle asset the app may download: manifest.json, the shared tables and the one-GW-per-row xP table.
+# The model's joint simulations (xp_sims.parquet, ~N x players x 6 GWs rows) and xp_fixtures are NEVER read by
+# the app; _read refuses any other name (tests/test_app_planner.py checks it).
+APP_ASSETS: tuple[str, ...] = (MANIFEST, *(f"{t}.parquet" for t in APP_TABLES), XP_FILE)
+
+
 def _read(source: str, name: str, bundle_id: str | None = None) -> bytes:
     """manifest.json of the latest release (bundle_id None) or one asset of release bundle-<bundle_id>.
 
-    Assets are read from the manifest's own tag, so a release published meanwhile cannot mix in.
+    Assets are read from the manifest's own tag, so a release published meanwhile cannot mix in. Only names
+    in APP_ASSETS are ever read.
     """
+    if name not in APP_ASSETS:
+        raise ValueError(f"{name} is not an app asset")
     if not _is_remote(source):
         return (Path(source) / name).read_bytes()
     base = source.rstrip("/")
@@ -192,9 +202,6 @@ def _from_bundle(part: str) -> Any:
 
 
 # ============================================================================================ model (xP)
-XP_FILE = "xp.parquet"
-
-
 @st.cache_data(ttl=SHARED_TTL_S, show_spinner="Loading the xP table...", max_entries=2)
 def _xp(source: str, bundle_id: str, _manifest: JSON) -> tuple[pd.DataFrame | None, str | None]:
     """(xp table, None) or (None, reason): xp.parquet of bundle `bundle_id`, sha256-checked."""

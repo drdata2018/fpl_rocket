@@ -32,7 +32,9 @@ plus the bootstrap now_cost. The manifest records element_history_source = "fetc
 (the bundle that fetched it), element_history_fetched_at and element_history_reason.
 
 Optional model tables (scripts/build_bundle.py --with-model; fpl_rocket.model): xp, xp_sims, xp_fixtures, with
-model_version / model_fitted_on / model_features in the manifest. The app does not read them yet.
+model_version / model_fitted_on / model_features / model_n_sims in the manifest. The app reads xp only
+(fpl_rocket.data.APP_ASSETS); xp_sims (N = 4000 draws per player and GW) and xp_fixtures are for offline
+analysis.
 
 Optional news tables (scripts/build_bundle.py --news, on by default; fpl_rocket.news):
     status_history   FPL status / chance / news changes between consecutive bundles, carried forward from the
