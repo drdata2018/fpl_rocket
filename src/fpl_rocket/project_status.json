@@ -4,7 +4,8 @@
     {"item": "Points reconciliation", "status": "GW1-7: 0 mismatches (rules engine vs API total_points, scripts/reconcile_points.py)"},
     {"item": "Hosting spike", "status": "passed: GitHub Actions and Streamlit Community Cloud both returned 200 from the FPL API"},
     {"item": "Planning state", "status": "built: squad, purchase/selling prices, bank, free-transfer range, chips (shown on My Team)"},
-    {"item": "Backtest", "status": "not started"},
-    {"item": "Expected-points model", "status": "not started (Phase B)"}
+    {"item": "Shared-data bundles", "status": "built: published every 3 hours as GitHub Releases; the app reads them and falls back to the live API"},
+    {"item": "Backtest", "status": "harness built; baseline 'form per 90 x availability' (retrospective, 2024-25 / 2025-26): RMSE 2.09 / 2.12, within-GW Spearman 0.70 / 0.72 - the bar for the model"},
+    {"item": "Expected-points model", "status": "not started (Phase B step 2)"}
   ]
 }
