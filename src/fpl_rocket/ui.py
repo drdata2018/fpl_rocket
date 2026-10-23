@@ -137,10 +137,17 @@ def _base_url() -> str:
 
 
 def footer_timestamps(footer: Any) -> None:
+    """Shared-data provenance (bundle id + creation time, or the live fetch time) and team-data time."""
     tid = current_team_id()
     lines = []
+    status: dict[str, Any] = {}
     try:
-        lines.append(f"Shared data as of {fmt_ts(data.shared_as_of())}")
+        status = data.shared_status()
+        when = fmt_ts(data.shared_as_of())
+        if status.get("mode") == "bundle":
+            lines.append(f"Shared data as of {when} · bundle {status['bundle_id']}")
+        else:
+            lines.append(f"Shared data as of {when} (live API)")
     except Exception:  # noqa: BLE001
         lines.append("Shared data: unavailable")
     if tid is not None:
@@ -150,6 +157,8 @@ def footer_timestamps(footer: Any) -> None:
             lines.append("Team data: unavailable")
     with footer:
         st.divider()
+        if status.get("mode") == "fallback":
+            st.warning(f"Shared data: live API fallback ({status.get('reason') or 'bundle unavailable'}).")
         st.caption("  \n".join(lines))
 
 

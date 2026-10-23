@@ -3,7 +3,11 @@
 Two cache layers (docs/PLAN_v2.md section 2), both in-process only (nothing written to disk in production):
 
 * SHARED (ttl 600 s, same for every visitor): bootstrap, fixtures, live stats of finished GWs, element
-  summaries.
+  summaries. Served from the latest published BUNDLE (GitHub Release, .github/workflows/bundle.yml) when one
+  is available: manifest.json (cached 300 s, failures too) -> every app table downloaded from that release's
+  tag, sha256-verified, held 600 s per bundle_id. Any failure (no release yet, checksum mismatch, timeout,
+  bundle older than BUNDLE_MAX_AGE_H) falls back to the live-API loaders below and the sidebar says
+  "live API fallback". One bundle serves all shared loaders, so files of different runs are never mixed.
 * PER-ID (ttl 300 s, keyed by the team ID): entry, history, picks of a GW, transfers, and the planning state.
   The planning state is built ONCE per ID from the cached per-ID pieces (reusing state.fetch_inputs through a
   cache-backed client adapter), so a cache miss never fans out into duplicate API calls.
@@ -13,24 +17,45 @@ and "team data as of". Exceptions (FPLAPIError, EntryNotFound, PlanningStateErro
 which degrades per feature (ui.guard). Failed calls are never cached.
 
 Environment (tests / offline replay only): FPL_ROCKET_CACHE_DIR = raw JSON cache directory,
-FPL_ROCKET_OFFLINE=1 = never touch the network.
+FPL_ROCKET_OFFLINE=1 = never touch the network (bundles disabled unless a source is set),
+FPL_ROCKET_BUNDLE_SOURCE = releases base URL, a local bundle directory, or "off".
 """
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from . import views
 from .api import FPLClient
-from .config import FETCH_WORKERS, MAX_TEAM_ID, SHARED_TTL_S, TEAM_CACHE_ENTRIES, TEAM_TTL_S
-from .state import PlanningState, build_planning_state, fetch_inputs
+from .bundle import APP_TABLES, MANIFEST, AppShared, app_shared
+from .config import (
+    BUNDLE_MAX_AGE_H,
+    BUNDLE_TIMEOUT_S,
+    FETCH_WORKERS,
+    MANIFEST_TTL_S,
+    MAX_TEAM_ID,
+    RELEASES_URL,
+    SHARED_TTL_S,
+    TEAM_CACHE_ENTRIES,
+    TEAM_TTL_S,
+)
+from .state import (
+    PlanningState,
+    build_planning_state,
+    fetch_inputs,
+    initial_squad_ids,
+    missing_round_prices,
+)
 
 JSON = dict[str, Any]
 
@@ -63,6 +88,102 @@ def _parallel(fn, items: list[Any]) -> list[Any]:
     return list(_POOL.map(fn, items))
 
 
+# ============================================================================================ bundles
+def bundle_source() -> str | None:
+    """Where bundles come from: FPL_ROCKET_BUNDLE_SOURCE, else the GitHub releases (None = disabled)."""
+    src = os.environ.get("FPL_ROCKET_BUNDLE_SOURCE")
+    if src:
+        return None if src.lower() == "off" else src
+    if os.environ.get("FPL_ROCKET_OFFLINE") == "1":
+        return None
+    return RELEASES_URL
+
+
+def _is_remote(source: str) -> bool:
+    return source.startswith(("https://", "http://"))
+
+
+def _read(source: str, name: str, bundle_id: str | None = None) -> bytes:
+    """manifest.json of the latest release (bundle_id None) or one asset of release bundle-<bundle_id>.
+
+    Assets are read from the manifest's own tag, so a release published meanwhile cannot mix in.
+    """
+    if not _is_remote(source):
+        return (Path(source) / name).read_bytes()
+    base = source.rstrip("/")
+    tag = "latest/download" if bundle_id is None else f"download/bundle-{bundle_id}"
+    url = f"{base}/{tag}/{name}"
+    resp = requests.get(url, timeout=BUNDLE_TIMEOUT_S, headers={"User-Agent": "fpl-rocket-app"})
+    resp.raise_for_status()
+    return resp.content
+
+
+def _err(exc: BaseException) -> str:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        code = exc.response.status_code
+        return "no bundle release published yet" if code == 404 else f"bundle download failed (HTTP {code})"
+    if isinstance(exc, requests.Timeout):
+        return "bundle download timed out"
+    if isinstance(exc, FileNotFoundError):
+        return "no bundle found"
+    return f"bundle rejected: {exc}" if str(exc) else f"bundle rejected ({type(exc).__name__})"
+
+
+@st.cache_data(ttl=MANIFEST_TTL_S, show_spinner=False, max_entries=4)
+def _manifest(source: str) -> tuple[JSON | None, str | None]:
+    """(manifest, None) or (None, reason). Failures are cached too: an outage costs one timeout per 300 s."""
+    try:
+        m = json.loads(_read(source, MANIFEST))
+        created = datetime.fromisoformat(str(m["created_at"]).replace("Z", "+00:00"))
+        if datetime.now(UTC) - created > timedelta(hours=BUNDLE_MAX_AGE_H):
+            return None, f"latest bundle {m['bundle_id']} is older than {BUNDLE_MAX_AGE_H} h"
+        return m, None
+    except Exception as exc:  # noqa: BLE001 - any failure means fallback
+        return None, _err(exc)
+
+
+@st.cache_resource(ttl=SHARED_TTL_S, show_spinner="Loading shared data bundle...", max_entries=2)
+def _bundle(source: str, bundle_id: str, _manifest: JSON) -> tuple[AppShared | None, str | None]:
+    """Download and verify every app table of one bundle. Held once per process and never handed out
+    directly (the accessors below give copies through st.cache_data). Failures are held for the ttl too."""
+    try:
+        names = [f"{t}.parquet" for t in APP_TABLES]
+        blobs = _parallel(lambda n: _read(source, n, bundle_id), names)
+        return app_shared(_manifest, dict(zip(names, blobs, strict=True)), views.LIVE_STATS), None
+    except Exception as exc:  # noqa: BLE001 - any failure means fallback
+        return None, _err(exc)
+
+
+def _active() -> tuple[AppShared | None, JSON]:
+    """(verified bundle or None, status) - the status feeds the sidebar."""
+    src = bundle_source()
+    if src is None:
+        return None, {"mode": "live"}
+    m, err = _manifest(src)
+    if m is None:
+        return None, {"mode": "fallback", "reason": err}
+    b, err = _bundle(src, str(m["bundle_id"]), m)
+    if b is None:
+        return None, {"mode": "fallback", "reason": err}
+    return b, {"mode": "bundle", "bundle_id": b.bundle_id, "created_at": b.created_at}
+
+
+def shared_status() -> JSON:
+    """{"mode": "bundle" | "live" | "fallback", ...}: bundle in use, bundles disabled, or bundle unusable."""
+    return _active()[1]
+
+
+@st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=8)
+def _bundle_part(bundle_id: str, part: str, _b: AppShared) -> Any:
+    """A copy of one part of the bundle (pages may mutate what they get; the held bundle stays intact)."""
+    return getattr(_b, part)
+
+
+def _from_bundle(part: str) -> Any:
+    b, _ = _active()
+    return None if b is None else _bundle_part(b.bundle_id, part, b)
+
+
 # ============================================================================================ shared layer
 @st.cache_data(ttl=SHARED_TTL_S, show_spinner="Loading FPL data...", max_entries=2)
 def _bootstrap() -> tuple[JSON, str]:
@@ -70,25 +191,37 @@ def _bootstrap() -> tuple[JSON, str]:
 
 
 def bootstrap() -> JSON:
-    return _bootstrap()[0]
+    b = _from_bundle("bootstrap")
+    return b if b is not None else _bootstrap()[0]
 
 
 def shared_as_of() -> str:
-    return _bootstrap()[1]
+    b, _ = _active()
+    return b.created_at if b is not None else _bootstrap()[1]
+
+
+def _shared_key() -> str:
+    b, _ = _active()
+    return f"bundle {b.bundle_id}" if b is not None else f"live {_bootstrap()[1]}"
 
 
 @st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=2)
-def _players(as_of: str) -> pd.DataFrame:  # keyed by the bootstrap fetch time so both expire together
+def _players(key: str) -> pd.DataFrame:  # keyed by bundle id / bootstrap fetch time so both expire together
     return views.players_frame(bootstrap())
 
 
 def players() -> pd.DataFrame:
-    return _players(shared_as_of())
+    return _players(_shared_key())
 
 
 @st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=2)
-def fixtures() -> list[JSON]:
+def _fixtures() -> list[JSON]:
     return client().fixtures()
+
+
+def fixtures() -> list[JSON]:
+    f = _from_bundle("fixtures")
+    return f if f is not None else _fixtures()
 
 
 @st.cache_data(ttl=SHARED_TTL_S, show_spinner="Loading gameweek stats...", max_entries=2)
@@ -101,7 +234,8 @@ def _live_table(gws: tuple[int, ...]) -> pd.DataFrame:
 
 def live_table() -> pd.DataFrame:
     """Live stats of every finished GW (one row per GW x player)."""
-    return _live_table(tuple(views.finished_gws(bootstrap())))
+    live = _from_bundle("live")
+    return live if live is not None else _live_table(tuple(views.finished_gws(bootstrap())))
 
 
 @st.cache_data(ttl=SHARED_TTL_S, show_spinner=False, max_entries=1000)
@@ -197,16 +331,28 @@ def _prefetch_element_summaries(ids: list[int]) -> None:
     ttl=TEAM_TTL_S, show_spinner="Reconstructing the planning state...", max_entries=TEAM_CACHE_ENTRIES
 )
 def planning_state(team_id: int) -> PlanningState:
-    """Planning state for the upcoming GW (raises PlanningStateError / FPLAPIError)."""
+    """Planning state for the upcoming GW (raises PlanningStateError / FPLAPIError).
+
+    Initial-squad prices come from the bundle's round_prices; only players missing there cost a live
+    element-summary call (all 15 when no bundle is available).
+    """
+    b, _ = _active()
+    round_prices = b.round_prices if b is not None else None
     hist = history(team_id)
     cur = hist.get("current") or []
     if cur:
         started = int(entry(team_id).get("started_event") or cur[0]["event"])
-        first = picks(team_id, started)
-        if first:
-            _prefetch_element_summaries([int(p["element"]) for p in first["picks"]])
-    inputs = fetch_inputs(_CachedClient(), team_id)
-    return build_planning_state(**inputs, prices_as_of=f"bootstrap fetched {shared_as_of()}")
+        ids = initial_squad_ids({started: picks(team_id, started)}, started)
+        missing = missing_round_prices(ids, round_prices)
+        if missing:
+            _prefetch_element_summaries(missing)
+    inputs = fetch_inputs(_CachedClient(), team_id, round_prices=round_prices)
+    as_of = (
+        f"bundle {b.bundle_id} (created {b.created_at})"
+        if b is not None
+        else f"bootstrap fetched {shared_as_of()}"
+    )
+    return build_planning_state(**inputs, prices_as_of=as_of)
 
 
 @st.cache_data(
@@ -229,3 +375,4 @@ def league_standings_page1(league_id: int) -> JSON:
 def clear_all() -> None:
     """Drop every cached payload (tests and timing measurements)."""
     st.cache_data.clear()
+    st.cache_resource.clear()

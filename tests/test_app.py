@@ -34,8 +34,10 @@ def offline(monkeypatch):
     monkeypatch.setenv("FPL_ROCKET_CACHE_DIR", str(SNAP))
     monkeypatch.setenv("FPL_ROCKET_OFFLINE", "1")
     st.cache_data.clear()
+    st.cache_resource.clear()
     yield
     st.cache_data.clear()
+    st.cache_resource.clear()
 
 
 def _app(team_id: str | None = None) -> AppTest:
@@ -178,3 +180,68 @@ def test_deterministic_replay_from_snapshot():
         at.run()
         runs.append([x for x in _snapshot_of(at) if "built" not in str(x)])
     assert runs[0] == runs[1] and runs[0]
+
+
+# ------------------------------------------------------------------------------------ shared-data bundles
+def _sidebar_text(at: AppTest) -> str:
+    return " ".join(c.value for c in at.sidebar.caption)
+
+
+def _run_all_pages(at: AppTest) -> None:
+    for page in PAGES:
+        at.switch_page(page)
+        at.run()
+        assert not at.exception, (page, [e.value for e in at.exception])
+
+
+@pytest.fixture(scope="module")
+def fixture_bundle(tmp_path_factory):
+    from bundle_fixture import build_snapshot_bundle
+
+    return build_snapshot_bundle(tmp_path_factory.mktemp("release"))
+
+
+def test_bundle_path_serves_shared_data(monkeypatch, tmp_path, fixture_bundle):
+    from bundle_fixture import per_id_cache
+
+    # only per-ID payloads are replayable: bootstrap, fixtures, live GWs and element summaries MUST come
+    # from the bundle (round_prices replace the 15 element-summary calls of the planning state)
+    monkeypatch.setenv("FPL_ROCKET_CACHE_DIR", str(per_id_cache(tmp_path / "cache")))
+    monkeypatch.setenv("FPL_ROCKET_BUNDLE_SOURCE", str(fixture_bundle))
+    at = _app(ENTRIES[0])
+    _run_all_pages(at)
+    for page in PAGES:
+        at.switch_page(page)
+        at.run()
+        assert not at.warning, (page, [w.value for w in at.warning])
+    assert f"bundle {fixture_bundle.name}" in _sidebar_text(at)
+    at.switch_page("app_pages/my_team.py")
+    at.run()
+    assert "Planning state" in _texts(at) and "Status: awaiting confirmation" in _texts(at)
+    ft = next(m for m in at.metric if m.label.startswith("Free transfers for GW"))
+    assert ft.value
+
+
+def test_missing_release_falls_back_to_live_api(monkeypatch, tmp_path):
+    monkeypatch.setenv("FPL_ROCKET_BUNDLE_SOURCE", str(tmp_path / "no_release_yet"))
+    at = _app(ENTRIES[0])
+    _run_all_pages(at)
+    warn = [w.value for w in at.sidebar.warning]
+    assert any("live API fallback" in w for w in warn), warn
+    assert "(live API)" in _sidebar_text(at)
+    assert not [w for w in at.main.warning], [w.value for w in at.main.warning]  # pages unaffected
+
+
+def test_checksum_mismatch_falls_back_to_live_api(monkeypatch, tmp_path, fixture_bundle):
+    import shutil
+
+    bad = tmp_path / fixture_bundle.name
+    shutil.copytree(fixture_bundle, bad)
+    raw = (bad / "players.parquet").read_bytes()
+    (bad / "players.parquet").write_bytes(raw[:-8] + b"tampered")
+    monkeypatch.setenv("FPL_ROCKET_BUNDLE_SOURCE", str(bad))
+    at = _app(ENTRIES[0])
+    _run_all_pages(at)
+    warn = [w.value for w in at.sidebar.warning]
+    assert any("live API fallback" in w and "checksum" in w for w in warn), warn
+    assert "(live API)" in _sidebar_text(at) and "bundle " not in _sidebar_text(at)
