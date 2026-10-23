@@ -11,6 +11,8 @@ with real outcomes under identical rules:
   fpl_rocket.backtest.PREDICTORS["model"]);
 * BASELINE policy: the same planner on the baseline predictor (form per 90 x availability);
 * HOLD policy: never transfers; best XI + captain by the baseline each GW.
+* every policy: players with fewer than 3 GWs of history before the GW (backtest.low_history, the rule behind
+  the live `low_history` flag) are never captain / vice and never bought; owned ones may stay in the XI.
 
 Predictions for later GWs of the horizon: the model predictor predicts the target GW only (horizon 1), so a
 later GW uses the same per-fixture xP x that GW's fixture count (a blank scores 0, a double twice). The
@@ -41,7 +43,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .backtest import PLAYER_TYPES, PREDICTORS, Predictor, gw_average_proxy, rolling_origin
+from .backtest import LOW_HISTORY_GWS, PLAYER_TYPES, PREDICTORS, Predictor, gw_average_proxy, rolling_origin
+from .model.features import low_history
 from .planner import (
     MULTI_GW,
     ONE_GW_WITH_TRANSFERS,
@@ -119,6 +122,18 @@ def per_fixture_predictions(
     return out
 
 
+def low_history_sets(df: pd.DataFrame, season: str) -> dict[int, frozenset[int]]:
+    """{gw: players with fewer than LOW_HISTORY_GWS GWs of history before the GW} (backtest.low_history rule,
+    the same for every predictor): never captain nor bought, in every policy."""
+    out: dict[int, frozenset[int]] = {}
+    for fold in rolling_origin(df, [season]):
+        tp = fold.target_players()
+        tp = tp[tp["element_type"].isin(PLAYER_TYPES)].reset_index(drop=True)
+        _, low = low_history(tp, fold.train, LOW_HISTORY_GWS)
+        out[fold.target_gw] = frozenset(int(e) for e in tp.loc[low.to_numpy(bool), "element"])
+    return out
+
+
 def horizon_xp(
     data: SeasonData, per_fixture: dict[int, pd.Series], t: int, horizon: int, memory: dict[int, float]
 ) -> tuple[list[int], dict[tuple[int, int], float]]:
@@ -153,7 +168,9 @@ def _pool(info: pd.DataFrame) -> dict[int, Candidate]:
     }
 
 
-def initial_squad(data: SeasonData, xp1: dict[tuple[int, int], float]) -> tuple[dict[int, int], int]:
+def initial_squad(
+    data: SeasonData, xp1: dict[tuple[int, int], float], low: frozenset[int] = frozenset()
+) -> tuple[dict[int, int], int]:
     """The xP-optimal legal 15 under the budget at GW1 prices (planner, empty squad, wildcard week)."""
     g = data.gws[0]
     inp = PlannerInput(
@@ -164,6 +181,7 @@ def initial_squad(data: SeasonData, xp1: dict[tuple[int, int], float]) -> tuple[
         xp=xp1,
         pool=_pool(data.per_gw[g]),
         chips_available=[{"name": "wildcard", "start_event": g, "stop_event": g}],
+        low_history=low,
     )
     settings = PlanSettings(
         objective=ONE_GW_WITH_TRANSFERS,
@@ -205,7 +223,8 @@ def run_season(
     preds = {name: per_fixture_predictions(df, season, p, log) for name, p in predictors.items()}
     first = data.gws[0]
     _, xp1 = horizon_xp(data, preds["baseline"], first, 1, {})
-    start, bank = initial_squad(data, xp1)
+    lows = low_history_sets(df, season)
+    start, bank = initial_squad(data, xp1, lows.get(first, frozenset()))
     if log:
         log(f"{season}: start squad cost {sum(start.values()) / 10:.1f}, bank {bank / 10:.1f}")
     states = {p: PolicyState(dict(start), bank, 1) for p in POLICIES}
@@ -217,6 +236,7 @@ def run_season(
         for e, r in zip(info.index, info.itertuples(index=False), strict=True):
             last[int(e)] = {"element_type": r.element_type, "team_id": r.team_id, "value": r.value}
         horizons = {name: horizon_xp(data, preds[name], t, horizon, memories[name]) for name in preds}
+        low = lows.get(t, frozenset())
         avg = gw_average_proxy(data.targets[t])
         pts = info["points"].to_dict()
         mins = info["minutes"].to_dict()
@@ -237,6 +257,7 @@ def run_season(
                     gws=gws,
                     xp=xp,
                     pool=_pool(info),
+                    low_history=low,
                 )
                 plan = solve(
                     inp,
@@ -265,7 +286,7 @@ def run_season(
             else:
                 squad = sorted(st.squad)
                 xi = best_xi(squad, et, score)
-                cap, vice = captain_pair(xi, score)
+                cap, vice = captain_pair(xi, score, low)
                 bench = bench_order([e for e in squad if e not in xi], et, score)
             n = len(t_in)
             hits = 0 if t == first else max(0, n - st.free_transfers)

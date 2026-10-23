@@ -133,3 +133,12 @@ def test_max_drawdown_and_block_bootstrap():
     a = matched.block_bootstrap_mean(x, resamples=100, seed=1)
     b = matched.block_bootstrap_mean(x, resamples=100, seed=1)
     assert np.array_equal(a, b) and abs(a.mean() - x.mean()) < 2
+
+
+def test_low_history_players_are_flagged_until_three_gws():
+    df = _archive()
+    newcomer = int(df["element"].max())
+    df = df[~((df["season"] == "2023-24") & (df["element"] == newcomer))]
+    lows = matched.low_history_sets(df, "2024-25")
+    assert newcomer in lows[1] and newcomer in lows[3] and newcomer not in lows[4]
+    assert len(lows[1]) == 1
