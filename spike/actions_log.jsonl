@@ -106,3 +106,7 @@
 {"ts":"2026-10-30T09:59:26+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000082","endpoint":"fixtures/?event=8","status":200,"bytes":25339,"ms":4}
 {"ts":"2026-10-30T09:59:26+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000082","endpoint":"entry/7630179/","status":200,"bytes":8284,"ms":123}
 {"ts":"2026-10-30T09:59:26+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000082","endpoint":"event/7/live/","status":200,"bytes":474148,"ms":4}
+{"ts":"2026-10-30T18:00:01+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000086","endpoint":"bootstrap-static/","status":200,"bytes":1790882,"ms":308}
+{"ts":"2026-10-30T18:00:01+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000086","endpoint":"fixtures/?event=8","status":200,"bytes":25339,"ms":21}
+{"ts":"2026-10-30T18:00:01+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000086","endpoint":"entry/7630179/","status":200,"bytes":8284,"ms":165}
+{"ts":"2026-10-30T18:00:01+00:00","host_hint":"github-actions:Linux:GitHub Actions 1000000086","endpoint":"event/7/live/","status":200,"bytes":474148,"ms":20}
