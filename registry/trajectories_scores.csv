@@ -1,0 +1,5 @@
+gw,policy,label,status,flagged,reason,scored_at,bundle_id,points,hits,hit_cost,net,transfers,cumulative_net,gw_average,net_minus_average,cumulative_vs_average,transfers_total,hits_total,captain,vice,armband,auto_subs,xi,bench,transfers_in,transfers_out
+9,model_aggressive,"Model, aggressive",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
+9,model_restrained,"Model, restrained",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
+9,form_restrained,"Form, restrained",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
+9,hold,Hold (no transfers),not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
