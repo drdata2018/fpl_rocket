@@ -56,7 +56,9 @@ jobs:
           ref: main
 
       - name: Target commit (main, whatever branch triggered the run)
-        run: echo "MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+        run: |
+          echo "MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "FPL_CODE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@v6
 

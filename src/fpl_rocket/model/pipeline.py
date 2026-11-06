@@ -67,7 +67,9 @@ XP_COLUMNS = (
 def git_sha_short(default: str = "nogit") -> str:
     import os
 
-    sha = os.environ.get("GITHUB_SHA")
+    # FPL_CODE_SHA: the commit actually checked out (bundle.yml always runs main, even when a push to
+    # trigger-bundle started it, so GITHUB_SHA would name the trigger commit)
+    sha = os.environ.get("FPL_CODE_SHA") or os.environ.get("GITHUB_SHA")
     if sha:
         return sha[:7]
     try:
