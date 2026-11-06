@@ -23,3 +23,7 @@ spike/local_*.jsonl
 # Community archive downloads and backtest outputs (never committed)
 data/archive/
 data/backtests/
+
+# As-known archive (step 4a) and its raw downloads (never committed)
+data/asknown/
+data/raw/
