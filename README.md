@@ -36,8 +36,9 @@ transfers, free-transfer banking, hits, chips) runs in shadow mode. Before every
 recorded for a fixed roster of five public teams and scored after the gameweek; none is shown to users until
 that record shows whether they help.
 
-**How the registry scores.** The bundle built 30-90 minutes before each deadline is kept forever as the
-scored snapshot (`deadline-gw<N>`), with the xP table as issued and the planner's proposals for the roster:
+**How the registry scores.** The scored snapshot (`deadline-gw<N>`, kept forever) is the last bundle published between 12 hours and 30 minutes before the deadline; its lead time is recorded
+(every bundle in that window replaces the release's assets, so the last one wins; `registry_meta.json` lists the
+`superseded_bundles`). GW9 is recorded as missing because no bundle landed in the then 60-minute window (30-90 minutes before). The snapshot holds the xP table as issued and the planner's proposals for the roster:
 (a) best XI, captain and vice without transfers, (b) the next gameweek with up to 2 transfers (4-point hits
 allowed), (c) a 5-gameweek path (decay 0.85, free-transfer banking). After the gameweek is finished and
 checked, a daily job scores it against the real points: xP RMSE and rank correlation against a frozen
@@ -47,7 +48,7 @@ manager's own, and the planned line-up's points (automatic substitutions, armban
 **missing**, never skipped. Scores live in `registry/registry_scores.csv` on the `spike-log` branch; the Model
 & Planner page shows the latest.
 
-**Four virtual managers (prospective policy trajectories, from GW9).** The decisive test of the planner: four
+**Four virtual managers (prospective policy trajectories, from GW10; GW9 has no snapshot).** The decisive test of the planner: four
 virtual FPL managers start from the SAME squad and play every gameweek without chips, each choice recorded
 before its deadline. *Model, aggressive* (planner objective (c): 3-GW horizon, decay 0.85, up to 2 transfers,
 hits when the objective says so), *Model, restrained* (same xP under the restrained rule
@@ -58,12 +59,13 @@ objective gains anything, a known simplification; no chips, so the post-wildcard
 *Form, restrained* (the restrained rule on the frozen form-per-90 baseline) and *Hold* (never transfers; best
 XI + captain by the baseline). Until step 3h the restrained rule was "<= 1 transfer per GW"
 (`run_matched.py --restrained-rule one_per_gw` replays it). Start (`trajectories.START_RULE`, favours
-neither predictor): the most-owned legal 15 under 100.0 at the GW9 deadline prices - players ranked by
+neither predictor): the most-owned legal 15 under 100.0 at the first recorded deadline's prices (GW10) - players ranked by
 `selected_by_percent` (ties: cheaper, then lower id) and taken greedily while the position has an open slot
 (2/5/5/3), the club has fewer than 3 picks and the money left still pays for the cheapest legal completion;
-selectable players only; bank = 100.0 - cost; 1 free transfer entering GW10. Each pre-deadline run reads the
-previous state from the latest earlier `deadline-gw<k>` release (never a `bundle-*` one; a read error other
-than "not found" aborts instead of restarting) and writes `trajectories_state.json` (squads with purchase
+selectable players only; bank = 100.0 - cost; 1 free transfer entering the next GW. Each pre-deadline run
+reads the previous state from the latest `deadline-gw<k>` release with k < N (never a `bundle-*` one, never
+`deadline-gw<N>` itself, so a later bundle in the window recomputes GW N from the same start with fresher
+forecasts; a read error other than "not found" aborts instead of restarting) and writes `trajectories_state.json` (squads with purchase
 prices, bank, free transfers, transfer log, line-ups, provisional points) and `trajectories_plans.json` (XI,
 captain, vice, bench order, transfers of GW N) into `deadline-gw<N>`. A GW without them is recorded as
 **missing**: squad and line-up carried forward (free transfers accrue), still scored with automatic
@@ -87,7 +89,11 @@ Community Cloud free tier, data jobs run on GitHub Actions and are published as 
 - **First release (once):** on GitHub open the repo -> **Actions** -> **bundle** -> **Run workflow** ->
   branch `main`. After 2-3 minutes **Releases** shows `Bundle <id>` marked *Latest*; the app switches to it
   within 5 minutes. Until then every page works on the live API with a fallback notice. Later runs are
-  hourly and automatic.
+  scheduled every 20 minutes (GitHub runs scheduled workflows far less often than asked).
+- **Force a bundle (no API token):** push any commit to the branch `trigger-bundle`; the workflow always
+  builds `main`. The pushed commit must contain `.github/workflows/bundle.yml` (GitHub reads the push trigger
+  from it), so start from `main`, not from an empty orphan:
+  `git checkout -b trigger-tmp main && git commit --allow-empty -m "trigger bundle" && git push origin HEAD:trigger-bundle -f && git checkout main && git branch -D trigger-tmp`.
 - **Switches** (code constants, changed by a commit): `SHOW_SHADOW_PLANS` in `src/fpl_rocket/config.py`
   (False = no plan is shown; True re-enables the plan UI as built), `REGISTRY_START_GW = 9` in
   `src/fpl_rocket/registry.py`, `BUNDLE_N_SIMS = 4000` in `src/fpl_rocket/model/config.py`, solver time
@@ -159,9 +165,11 @@ uv run python scripts/build_bundle.py --out data/bundles --with-model   # one bu
   otherwise it is reused and `round_prices` is rebuilt from it plus the bootstrap `now_cost`. The manifest says
   `element_history_source: fetched | reused:<bundle_id>` (the bundle that fetched it), with
   `element_history_fetched_at` and `element_history_reason`.
-- **Scored snapshot:** the bundle created in the window 30-90 min before the deadline (manifest
-  `pre_deadline`) is also published as `deadline-gw<N>`, kept forever. If GitHub cron delay leaves no bundle in
-  that window, the week is recorded as missing.
+- **Scored snapshot:** the scored snapshot is the last bundle published between 12 hours and 30 minutes before the deadline; its lead time is recorded (manifest `lead_time_minutes`, `pre_deadline` = 30 min <= deadline -
+  created_at <= 12 h). Every pre-deadline bundle creates or updates `deadline-gw<N>` (`gh release upload
+  --clobber`, title and notes edited), kept forever; `registry_meta.json` and `trajectories_*` record
+  `lead_time_minutes` and `superseded_bundles`. If a run's trajectories or registry step fails, an existing
+  release is left unchanged. GW9 is recorded as missing because no bundle landed in the then 60-minute window (30-90 minutes before).
 - **Retention:** `bundle-*` releases older than 48 h are deleted; `deadline-*` never.
 - **Model:** the job restores the archived previous season (actions/cache, `load_archive.py` on a miss) and
   runs `build_bundle.py --with-model`: `xp.parquet` (per player and GW for the next 6 GWs: mean xP, p20/p50/p80,
@@ -172,12 +180,14 @@ uv run python scripts/build_bundle.py --out data/bundles --with-model   # one bu
   `model_runtime_s`. A model failure is recorded as `model_error`; the data bundle still publishes. The app
   reads `xp.parquet` only (next GW, next-3-GW sums, P(play) bands); `xp_sims` and `xp_fixtures` are never
   downloaded by the app.
-- **Registry:** for the pre-deadline bundle only, after `bundle-<id>` is published, `registry_write.py` adds
+- **Registry:** for every pre-deadline bundle, after `bundle-<id>` is published, `registry_write.py` adds
   `registry_xp.parquet`, `registry_plans.json` (objectives (a), (b), (c) per roster team) and
   `registry_meta.json` (model version, N, rules version, exclusions) to `deadline-gw<N>`. The step has
   `continue-on-error` and its own timeout: a failure never blocks either release, the week scores as missing.
   Before it, `trajectories_write.py` (its own `continue-on-error` step, 10 min) adds the four virtual managers'
-  `trajectories_state.json` / `trajectories_plans.json` (from GW9 on).
+  `trajectories_state.json` / `trajectories_plans.json` (started at GW10; GW9 rows are `not_started` and
+  never count in the cumulative totals or the chart). Rows already in either scores CSV are never duplicated
+  or rewritten.
   `.github/workflows/registry_score.yml` scores finished GWs daily at 06:00 UTC (registry and virtual managers;
   `registry_score.py --trajectories-csv`).
 

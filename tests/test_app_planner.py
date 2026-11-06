@@ -223,9 +223,12 @@ def test_registry_scores_are_read_and_summarised(tmp_path, monkeypatch):
 def test_virtual_managers_section_without_scores():
     at = _planner(_app(None))
     text = _texts(at)
-    assert f"Four virtual managers (prospective, from GW{registry.REGISTRY_START_GW})" in text
+    # GW9 has no snapshot (step 3i): the trajectories start at GW10
+    assert "Four virtual managers (prospective, from GW10)" in text
     assert "not a recommendation" in text and "chosen and published *before* the deadline" in text
-    assert f"the first scored gameweek is GW{registry.REGISTRY_START_GW}" in text
+    assert "the first scored gameweek is GW10" in text
+    assert "last bundle published between 12 hours and 30 minutes before the deadline" in text
+    assert "GW9 is recorded as missing because no bundle landed in the then 60-minute window" in text
     assert not [e for e in at.main if "chart" in e.type] and not at.dataframe
 
 

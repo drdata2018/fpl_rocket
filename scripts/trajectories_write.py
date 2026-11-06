@@ -6,7 +6,9 @@ Usage: uv run python scripts/trajectories_write.py --bundle data/bundles/<id> --
 
 Reads the bundle (sha256-checked), computes the frozen baseline's per-fixture xP (form per 90 x availability
 on the bundle's current season + the archived previous season, as registry_write.py does), loads the previous
-state from the latest EARLIER deadline-gw<k> release (--previous: the releases URL, a local directory of
+state from the latest EARLIER deadline-gw<k> release (k < N: never deadline-gw<N> itself, so re-running for
+the same GW recomputes its step from the same start; the ids of bundles that had filled deadline-gw<N> are
+recorded as superseded_bundles) (--previous: the releases URL, a local directory of
 deadline-gw<k>/ folders, or `none` = start afresh), takes the GW N step for every trajectory and writes
 trajectories_state.json and trajectories_plans.json to --out. The bundle workflow uploads them into
 deadline-gw<N> before the deadline. Exits 0 without writing for a GW before REGISTRY_START_GW. A read error
@@ -41,6 +43,14 @@ def main(argv: list[str] | None = None) -> int:
     if inp.gw < registry.REGISTRY_START_GW:
         print(f"GW{inp.gw} is before REGISTRY_START_GW={registry.REGISTRY_START_GW}: nothing to write")
         return 0
+    if args.previous != "none":
+        # bookkeeping only: which bundles had already filled deadline-gw<N> (this run replaces them); the
+        # starting state is NEVER read from deadline-gw<N> itself
+        inp.superseded_bundles = tuple(registry.superseded_bundles(inp.gw, inp.bundle_id, args.previous))
+    print(
+        f"GW{inp.gw} bundle {inp.bundle_id}: lead {inp.lead_time_minutes} min;"
+        f" supersedes {list(inp.superseded_bundles) or 'none'}"
+    )
     previous = None
     if args.previous != "none":
         found = trajectories.latest_state(args.previous, inp.gw)

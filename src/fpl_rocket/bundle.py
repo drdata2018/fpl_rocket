@@ -20,10 +20,12 @@ players / teams / events / bootstrap_misc / fixtures are written LOSSLESSLY from
 array per key, nulls kept, nested values JSON-encoded and listed under `json_columns` in the manifest), so
 records_from_parquet() gives back the API's own values; the app rebuilds bootstrap-static from them.
 
-The manifest also carries next_event / next_deadline_time and `pre_deadline`: True when the bundle is created
-30-90 minutes before the next deadline (PRE_DEADLINE_WINDOW_MIN). The hourly publishing workflow
-(.github/workflows/bundle.yml) tags such a bundle `deadline-gw<N>` and keeps it permanently; if GitHub's cron
-delay leaves no bundle in that window, the week is recorded as missing.
+The manifest also carries next_event / next_deadline_time, lead_time_minutes (deadline - created_at) and
+`pre_deadline`: True when the bundle is created between 12 hours and 30 minutes before the next deadline
+(PRE_DEADLINE_WINDOW_MIN, both ends inclusive). The publishing workflow (.github/workflows/bundle.yml, every
+20 minutes) (re)publishes EVERY such bundle as `deadline-gw<N>`, replacing the release's assets: the scored
+snapshot is the LAST bundle published in the window, kept permanently, with its lead time recorded. (Until
+GW9 the window was 30-90 minutes; GitHub ran the hourly cron only every 4-9 hours, so GW9 is missing.)
 
 Polite API load (hourly runs): element summaries (one call per player) are refetched only when the previous
 release's element_history is older than 6 h, a GW has finished since it was fetched, or there is no previous
@@ -77,9 +79,10 @@ from .rules import get_rules
 MANIFEST = "manifest.json"
 PARTIAL_SUFFIX = ".partial"
 FORMAT_VERSION = 2
-CRON_INTERVAL_H = 1  # .github/workflows/bundle.yml runs hourly (at :40)
-# pre_deadline = the bundle created 30-90 minutes before the next deadline (published as deadline-gw<N>)
-PRE_DEADLINE_WINDOW_MIN = (30, 90)
+CRON_INTERVAL_MIN = 20  # .github/workflows/bundle.yml cron "5,25,45 * * * *" (GitHub runs it far less often)
+# pre_deadline = a bundle created between 12 h and 30 min before the next deadline (both inclusive): every
+# such bundle (re)publishes deadline-gw<N>; the last one before deadline - 30 min is the scored snapshot
+PRE_DEADLINE_WINDOW_MIN = (30, 720)
 # element summaries (668 calls) are refetched only when the previous release's copy is older than this,
 # a GW has finished since, or there is no previous release (element_history_decision)
 ELEMENT_HISTORY_MAX_AGE_H = 6.0
@@ -439,17 +442,24 @@ class BuildResult:
 
 
 def deadline_info(events: list[JSON], now: datetime) -> JSON:
-    """next_event, next_deadline_time and pre_deadline: deadline - now in (30 min, 90 min]."""
+    """next_event, next_deadline_time, lead_time_minutes (deadline - now) and pre_deadline:
+    30 min <= deadline - now <= 12 h (PRE_DEADLINE_WINDOW_MIN, both ends inclusive)."""
     nxt = next((e for e in events if e.get("is_next")), None)
     if nxt is None:
-        return {"next_event": None, "next_deadline_time": None, "pre_deadline": False}
+        return {
+            "next_event": None,
+            "next_deadline_time": None,
+            "lead_time_minutes": None,
+            "pre_deadline": False,
+        }
     deadline = datetime.fromisoformat(str(nxt["deadline_time"]).replace("Z", "+00:00"))
     left = deadline - now
     lo, hi = PRE_DEADLINE_WINDOW_MIN
     return {
         "next_event": int(nxt["id"]),
         "next_deadline_time": deadline.isoformat(timespec="seconds"),
-        "pre_deadline": timedelta(minutes=lo) < left <= timedelta(minutes=hi),
+        "lead_time_minutes": round(left.total_seconds() / 60.0, 1),
+        "pre_deadline": timedelta(minutes=lo) <= left <= timedelta(minutes=hi),
     }
 
 
@@ -640,7 +650,7 @@ def write_bundle(
         **model_extra,
         **deadline_info(events, created),
         "pre_deadline_window_minutes": list(PRE_DEADLINE_WINDOW_MIN),
-        "cron_interval_hours": CRON_INTERVAL_H,
+        "cron_interval_minutes": CRON_INTERVAL_MIN,
     }
     return write_tables(tables, out_dir, result.snapshots, extra=extra, created=created)
 

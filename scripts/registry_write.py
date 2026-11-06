@@ -8,8 +8,10 @@ GW (form per 90 x availability on the bundle's current season + the archived pre
 public planning state of every roster entry from the FPL API (bootstrap and round prices from the bundle),
 solves the shadow planner's objectives (a), (b) and (c) for each (fpl_rocket.registry.PLAN_KEYS) and writes
 registry_xp.parquet (the xp table AS ISSUED; the simulations are not needed), registry_plans.json and
-registry_meta.json (model_version, model_n_sims) to --out. The bundle workflow uploads
-them into the deadline-gw<N> release. Needs the `model` dependency group (bundle_history_rows/bundle_targets).
+registry_meta.json (model_version, model_n_sims, lead_time_minutes, superseded_bundles = the bundles that had
+filled deadline-gw<N> before, read from that release) to --out. The bundle workflow uploads them into the
+deadline-gw<N> release, overwriting an earlier bundle's files (the last bundle in the window wins). Needs the
+`model` dependency group (bundle_history_rows/bundle_targets).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from fpl_rocket import registry, views  # noqa: E402
 from fpl_rocket.api import FPLClient  # noqa: E402
 from fpl_rocket.backtest import previous_season  # noqa: E402
 from fpl_rocket.bundle import APP_TABLES, app_shared, read_manifest, verified_file  # noqa: E402
+from fpl_rocket.config import RELEASES_URL  # noqa: E402
 from fpl_rocket.rules import CURRENT_SEASON  # noqa: E402
 from fpl_rocket.state import build_planning_state, fetch_inputs  # noqa: E402
 
@@ -56,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="per-solve limit in seconds (default 60, the app uses 10)",
+    )
+    ap.add_argument(
+        "--release-source",
+        default=None,
+        help="where the existing deadline-gw<N> release is read for superseded_bundles "
+        "(default: the releases URL; 'none' = skip)",
     )
     args = ap.parse_args(argv)
 
@@ -94,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
             states[entry_id] = build_planning_state(**inputs, prices_as_of=f"bundle {manifest['bundle_id']}")
         except Exception as exc:  # noqa: BLE001 - recorded per entry
             errors[entry_id] = f"{type(exc).__name__}: {exc}"
+    source = args.release_source or RELEASES_URL
+    superseded = [] if source == "none" else registry.superseded_bundles(gw, manifest["bundle_id"], source)
     reg_xp, plans, meta = registry.build_registry(
         manifest=manifest,
         bootstrap=shared.bootstrap,
@@ -102,12 +113,14 @@ def main(argv: list[str] | None = None) -> int:
         states=states,
         errors=errors,
         time_limit=args.time_limit,
+        superseded=superseded,
     )
     paths = registry.write_files(args.out, reg_xp, plans, meta)
     ok = sum(1 for e in plans["entries"] if e["status"] == "ok")
     print(
         f"registry GW{gw} bundle {manifest['bundle_id']} model {meta['model_version']} "
-        f"(N={meta['model_n_sims']}): {ok}/{len(plans['entries'])} entries planned"
+        f"(N={meta['model_n_sims']}): {ok}/{len(plans['entries'])} entries planned;"
+        f" lead {meta['lead_time_minutes']} min; supersedes {meta['superseded_bundles'] or 'none'}"
     )
     for e in plans["entries"]:
         st = {k: (e.get(k) or {}).get("status", "-") for k in registry.PLAN_KEYS}

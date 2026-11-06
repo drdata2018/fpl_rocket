@@ -24,7 +24,9 @@ keeps it selectable as one_per_gw for the retrospective replay).
 Every manager: players flagged low_history are never captain / vice and never bought (planner rule); players
 the game marks unselectable (can_select False or removed) are never bought.
 
-START (START_RULE, at the first pre-deadline run with gw >= REGISTRY_START_GW that finds no earlier state):
+START (START_RULE, at the first pre-deadline run with gw >= REGISTRY_START_GW that finds no earlier state;
+GW9 has no deadline release, so the trajectories start at GW10 and GW9 is scored status=not_started, which
+never counts in the cumulative totals or the chart):
 the most-owned legal 15 under 100.0 at that deadline's prices. Players are ranked by selected_by_percent
 (highest first; ties: cheaper first, then lower id) and taken greedily while (1) their position has an open
 slot (2 GKP, 5 DEF, 5 MID, 3 FWD), (2) their club has fewer than 3 picks and (3) the money left after buying
@@ -32,8 +34,11 @@ them still pays for the cheapest legal completion of the open slots (cheapest se
 slot, at most 3 per club). Neither predictor is used. Purchase price = now_cost, bank = 100.0 - cost, no
 transfers in the start GW, 1 free transfer entering the next GW.
 
-WRITE (scripts/trajectories_write.py, bundle workflow, pre-deadline bundle only): the previous state is read
-from the latest EARLIER deadline-gw<k> release (never a bundle-* release); GWs k+1..N-1 without a state are
+WRITE (scripts/trajectories_write.py, bundle workflow, every pre-deadline bundle: 12 h to 30 min before the
+deadline): the previous state is read from the latest deadline-gw<k> release with k < N (never a bundle-*
+release, never deadline-gw<N> itself), so a later bundle in the same window recomputes GW N's choices from the
+same starting state with fresher forecasts and overwrites the two files (lead_time_minutes and the
+superseded_bundles it replaced are recorded); GWs k+1..N-1 without a state are
 recorded as status=missing (squad unchanged, the last line-up carried, free transfers accrue). The new state
 (squads with purchase prices, bank, free transfers, transfer log, line-ups, provisional points from the
 bundle's finished-GW live stats) and the GW N choices (XI, captain, vice, bench order, transfers) are written
@@ -154,7 +159,11 @@ SCORE_COLUMNS = (
     "bench",
     "transfers_in",
     "transfers_out",
+    # minutes between the deadline-gw<N> bundle and the deadline (step 3i; empty for older rows)
+    "lead_time_minutes",
 )
+# statuses that are not a played week: never counted in cumulative totals or the chart
+NOT_PLAYED_STATUSES = ("not_started",)
 
 
 def _now() -> str:
@@ -371,6 +380,8 @@ class StepInputs:
     live: pd.DataFrame | None = None  # finished-GW live stats (gw, element, total_points, minutes)
     time_limit: float | None = None
     created_at: str | None = None
+    lead_time_minutes: float | None = None  # deadline - bundle created_at (manifest)
+    superseded_bundles: tuple[str, ...] = ()  # earlier bundles that had filled deadline-gw<gw>
 
 
 def inputs_from_bundle(
@@ -389,7 +400,7 @@ def inputs_from_bundle(
     from .backtest import previous_season
     from .bundle import APP_TABLES, app_shared, read_manifest, verified_file
     from .model.pipeline import bundle_history_rows
-    from .registry import baseline_per_fixture
+    from .registry import baseline_per_fixture, lead_time_minutes
     from .rules import CURRENT_SEASON
 
     bdir = Path(bundle_dir)
@@ -429,6 +440,7 @@ def inputs_from_bundle(
         deadline=manifest.get("next_deadline_time"),
         live=shared.live,
         time_limit=time_limit,
+        lead_time_minutes=lead_time_minutes(manifest),
     )
 
 
@@ -640,6 +652,8 @@ def step(
         created_at=inp.created_at or _now(),
         previous_gw=None if created else (previous or {}).get("gw"),
         missing_gws=missing,
+        lead_time_minutes=inp.lead_time_minutes,
+        superseded_bundles=list(inp.superseded_bundles),
         solver_time_limit_s=limit,
         horizon=HORIZON,
         decay=DECAY,
@@ -653,6 +667,8 @@ def step(
         "created_at": state["created_at"],
         "created_gw": state["created_gw"],
         "missing_gws": missing,
+        "lead_time_minutes": inp.lead_time_minutes,
+        "superseded_bundles": list(inp.superseded_bundles),
         "policies": {p.name: p.describe() for p in TRAJECTORIES},
         "trajectories": plans,
     }
@@ -758,6 +774,7 @@ def score_gw(
     *,
     bundle_id: str | None = None,
     missing_reason: str = "",
+    lead_time_minutes: float | None = None,
 ) -> list[JSON]:
     """One row per trajectory for GW `gw`. lineups: {policy: line-up record (xi, bench, captain, vice,
     status, hits, hit_cost, transfers_in, transfers_out)}; None = no trajectory exists yet (rows with
@@ -774,7 +791,11 @@ def score_gw(
     prev = previous_rows if previous_rows is not None else pd.DataFrame(columns=list(SCORE_COLUMNS))
     rows = []
     for p in TRAJECTORIES:
-        before = prev[(prev["policy"] == p.name) & (pd.to_numeric(prev["gw"], errors="coerce") < gw)]
+        before = prev[
+            (prev["policy"] == p.name)
+            & (pd.to_numeric(prev["gw"], errors="coerce") < gw)
+            & ~prev["status"].isin(NOT_PLAYED_STATUSES)
+        ]
         cum = float(pd.to_numeric(before["net"], errors="coerce").fillna(0).sum())
         cum_avg = float(pd.to_numeric(before["net_minus_average"], errors="coerce").fillna(0).sum())
         t_total = int(pd.to_numeric(before["transfers"], errors="coerce").fillna(0).sum())
@@ -785,6 +806,7 @@ def score_gw(
             "label": p.label,
             "scored_at": _now(),
             "bundle_id": bundle_id,
+            "lead_time_minutes": lead_time_minutes,
             "gw_average": avg,
         }
         lu = (lineups or {}).get(p.name)
@@ -838,8 +860,17 @@ def score_gw(
 def lineups_for(
     gw: int, source: str, start: int = REGISTRY_START_GW
 ) -> tuple[dict[str, JSON] | None, str, str | None]:
-    """(line-ups per policy, reason, bundle id) to score GW `gw`: the deadline-gw<gw> plans when recorded;
-    otherwise the latest earlier state rolled forward (status missing); None when no trajectory exists."""
+    """(line-ups per policy, reason, bundle id) to score GW `gw`: the deadline-gw<gw> plans when recorded
+    (the release's FINAL assets: the last bundle in the pre-deadline window); otherwise the latest earlier
+    state rolled forward (status missing); None when no trajectory exists."""
+    out, reason, bundle_id, _ = lineups_and_lead(gw, source, start)
+    return out, reason, bundle_id
+
+
+def lineups_and_lead(
+    gw: int, source: str, start: int = REGISTRY_START_GW
+) -> tuple[dict[str, JSON] | None, str, str | None, float | None]:
+    """lineups_for + the lead time (minutes) of the deadline-gw<gw> bundle (None when not recorded)."""
     plans = fetch(source, gw, PLANS_FILE)
     if plans is not None:
         out = {}
@@ -859,10 +890,10 @@ def lineups_for(
                     "transfers_out",
                 )
             }
-        return out, "", plans.get("bundle_id")
+        return out, "", plans.get("bundle_id"), plans.get("lead_time_minutes")
     found = latest_state(source, gw, start)
     if found is None:
-        return None, "the trajectories have not started (no state at or before this GW)", None
+        return None, "the trajectories have not started (no state at or before this GW)", None, None
     k, state = found
     out = {}
     for name, t in state["trajectories"].items():
@@ -876,7 +907,7 @@ def lineups_for(
             "transfers_in": [],
             "transfers_out": [],
         }
-    return out, f"carried from GW{k}", state.get("bundle_id")
+    return out, f"carried from GW{k}", state.get("bundle_id"), None
 
 
 def scores_frame(rows: Iterable[JSON]) -> pd.DataFrame:
@@ -891,9 +922,15 @@ def read_scores(csv_path: str | Path) -> pd.DataFrame:
 
 
 def append_scores(csv_path: str | Path, rows: list[JSON]) -> pd.DataFrame:
+    """Append rows; a (gw, policy) already in the CSV is never duplicated or rewritten (e.g. GW9
+    not_started)."""
     path = Path(csv_path)
     old = read_scores(path)
     new = scores_frame(rows)
+    if not old.empty and not new.empty:
+        seen = set(zip(pd.to_numeric(old["gw"], errors="coerce"), old["policy"].astype(str), strict=True))
+        keys = zip(pd.to_numeric(new["gw"], errors="coerce"), new["policy"].astype(str), strict=True)
+        new = new[[k not in seen for k in keys]]
     out = new if old.empty else pd.concat([old, new], ignore_index=True)
     order = {p.name: i for i, p in enumerate(TRAJECTORIES)}
     out = out.assign(_o=out["policy"].map(order)).sort_values(["gw", "_o"], kind="stable").drop(columns="_o")
@@ -911,11 +948,18 @@ def score_and_append(
     gw: int, csv_path: str | Path, client: Any, source: str = RELEASES_URL, start: int = REGISTRY_START_GW
 ) -> list[JSON]:
     """Score GW `gw` for every trajectory and append to the CSV (a missing week still gets rows)."""
-    lineups, reason, bundle_id = lineups_for(gw, source, start)
+    lineups, reason, bundle_id, lead = lineups_and_lead(gw, source, start)
     bootstrap = client.bootstrap()
     live = client.event_live(gw) if lineups is not None else {"elements": []}
     rows = score_gw(
-        gw, lineups, live, bootstrap, read_scores(csv_path), bundle_id=bundle_id, missing_reason=reason
+        gw,
+        lineups,
+        live,
+        bootstrap,
+        read_scores(csv_path),
+        bundle_id=bundle_id,
+        missing_reason=reason,
+        lead_time_minutes=lead,
     )
     append_scores(csv_path, rows)
     return rows
@@ -932,6 +976,10 @@ def summary(df: pd.DataFrame | None) -> JSON | None:
     if d.empty:
         return None
     d["gw"] = d["gw"].astype(int)
+    # a GW before the trajectories started (status not_started, e.g. GW9) is not a played week
+    d = d[~d["status"].astype(str).isin(NOT_PLAYED_STATUSES)]
+    if d.empty:
+        return None
     gw = int(d["gw"].max())
     labels = {p.name: p.label for p in TRAJECTORIES}
     order = [p.name for p in TRAJECTORIES]

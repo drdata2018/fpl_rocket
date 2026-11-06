@@ -115,9 +115,9 @@ def test_too_many_missing_summaries_fail_the_build(tmp_path):
 # ------------------------------------------------------------------------------------------ manifest flags
 @pytest.mark.parametrize(
     "minutes_left, expected",
-    [(180, False), (91, False), (90, True), (60, True), (31, True), (30, False), (10, False), (-5, False)],
+    [(780, False), (721, False), (720, True), (180, True), (60, True), (30, True), (29, False), (-5, False)],
 )
-def test_pre_deadline_flag_is_the_30_to_90_minute_window(minutes_left, expected):
+def test_pre_deadline_flag_is_the_12_hour_to_30_minute_window(minutes_left, expected):
     now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
     deadline = now + timedelta(minutes=minutes_left)
     events = [
@@ -137,12 +137,13 @@ def test_manifest_flags_from_snapshot(tmp_path):
     boot = _snap("bootstrap-static.json")
     nxt = next(e for e in boot["events"] if e["is_next"])
     deadline = datetime.fromisoformat(nxt["deadline_time"].replace("Z", "+00:00"))
-    early = read_manifest(build_snapshot_bundle(tmp_path / "a", deadline - timedelta(hours=10)))
+    early = read_manifest(build_snapshot_bundle(tmp_path / "a", deadline - timedelta(hours=13)))
     late = read_manifest(build_snapshot_bundle(tmp_path / "b", deadline - timedelta(hours=1)))
     assert early["pre_deadline"] is False and late["pre_deadline"] is True
     assert early["next_event"] == late["next_event"] == nxt["id"]
     assert late["next_deadline_time"] == deadline.isoformat(timespec="seconds")
-    assert late["cron_interval_hours"] == 1 and late["pre_deadline_window_minutes"] == [30, 90]
+    assert late["cron_interval_minutes"] == 20 and late["pre_deadline_window_minutes"] == [30, 720]
+    assert late["lead_time_minutes"] == 60.0 and early["lead_time_minutes"] == 780.0
 
 
 # ------------------------------------------------------------------------------------------ app payload

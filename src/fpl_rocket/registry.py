@@ -1,7 +1,9 @@
 """Prospective registry (docs/PLAN_v2.md section 4): the real scorecard of the model and the planner.
 
 WRITE (bundle workflow, pre-deadline bundle only; scripts/registry_write.py): next to the bundle files of the
-release `deadline-gw<N>` (the scored snapshot: the bundle created 30-90 min before the deadline):
+release `deadline-gw<N>` (the scored snapshot: the LAST bundle published between 12 h and 30 min before the
+deadline; every bundle in that window overwrites the three files, its lead time and the ids of the bundles it
+superseded are recorded in registry_meta.json):
     registry_xp.parquet   the xp table AS ISSUED (+ bundle_id, issued_gw, and `baseline_xp` = the frozen
                           baseline's prediction for GW N: form per 90 x availability)
     registry_plans.json   for a fixed roster of entry ids, from their public planning state at that moment
@@ -93,7 +95,11 @@ SCORE_COLUMNS = (
     "xi_model_c_pts",
     "transfers_c",
     "hits_c",
+    # minutes between the scored snapshot's bundle and the deadline (step 3i; empty for older rows)
+    "lead_time_minutes",
 )
+# a score row's identity: rows already in the CSV are never duplicated or rewritten by a later run
+SCORE_KEY = ("gw", "kind", "entry_id")
 # the planner objectives recorded per roster entry: plans key -> (objective, description)
 PLAN_KEYS = {
     "model": "(a) next GW, no transfers",
@@ -112,6 +118,57 @@ def _now() -> str:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def lead_time_minutes(manifest: JSON) -> float | None:
+    """deadline - bundle created_at in minutes (the manifest's own field when present)."""
+    if manifest.get("lead_time_minutes") is not None:
+        return float(manifest["lead_time_minutes"])
+    try:
+        deadline = datetime.fromisoformat(str(manifest["next_deadline_time"]).replace("Z", "+00:00"))
+        created = datetime.fromisoformat(str(manifest["created_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return round((deadline - created).total_seconds() / 60.0, 1)
+
+
+# files of an existing deadline-gw<N> release whose bundle ids tell which bundles filled it before
+_FILLER_FILES = ("manifest.json", "registry_meta.json", "trajectories_state.json")
+
+
+def superseded_bundles(
+    gw: int, current_bundle_id: str, source: str = RELEASES_URL, fetch_json: Any = None
+) -> list[str]:
+    """Ids of the earlier bundles that had filled deadline-gw<gw> (the release this bundle now replaces):
+    the bundle_id and superseded_bundles of its manifest / registry_meta / trajectories_state, sorted, the
+    current bundle excluded. [] when the release does not exist yet. Read errors are not fatal (the list is
+    then what could be read; the snapshot itself is never blocked by this bookkeeping)."""
+    fetch_json = fetch_json or _fetch_json
+    ids: set[str] = set()
+    for name in _FILLER_FILES:
+        try:
+            doc = fetch_json(source, gw, name)
+        except Exception:  # noqa: BLE001 - bookkeeping only
+            doc = None
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("bundle_id"):
+            ids.add(str(doc["bundle_id"]))
+        ids.update(str(b) for b in doc.get("superseded_bundles") or [])
+    ids.discard(str(current_bundle_id))
+    return sorted(ids)
+
+
+def _fetch_json(source: str, gw: int, name: str) -> JSON | None:
+    try:
+        raw = _get(source, gw, name)
+    except FileNotFoundError:
+        return None
+    except requests.HTTPError as exc:
+        if getattr(exc.response, "status_code", None) == 404:
+            return None
+        raise
+    return json.loads(raw)
 
 
 # ============================================================================================ write
@@ -191,6 +248,7 @@ def build_registry(
     errors: dict[int, str] | None = None,
     created_at: str | None = None,
     time_limit: float | None = None,
+    superseded: list[str] | None = None,
 ) -> tuple[pd.DataFrame, JSON, JSON]:
     """(registry_xp, registry_plans, registry_meta) from already-built pieces (pure; tested offline).
 
@@ -281,6 +339,10 @@ def build_registry(
         "bundle_id": str(manifest["bundle_id"]),
         "bundle_created_at": manifest.get("created_at"),
         "pre_deadline": bool(manifest.get("pre_deadline")),
+        "lead_time_minutes": lead_time_minutes(manifest),
+        "pre_deadline_window_minutes": manifest.get("pre_deadline_window_minutes"),
+        # earlier bundles that had filled this deadline release (the last bundle in the window wins)
+        "superseded_bundles": list(superseded or []),
         "model_version": manifest.get("model_version"),
         "model_n_sims": manifest.get("model_n_sims"),
         "rules_version": manifest.get("rules_version"),
@@ -382,6 +444,7 @@ def score_gw(
         "scored_at": _now(),
         "bundle_id": meta.get("bundle_id"),
         "model_version": meta.get("model_version"),
+        "lead_time_minutes": meta.get("lead_time_minutes"),
     }
     x = reg_xp[(reg_xp["gw"] == gw) & reg_xp["element"].isin(list(pts))].copy()
     x["actual"] = x["element"].map(pts).astype(float)
@@ -462,10 +525,16 @@ def scores_frame(rows: Iterable[JSON]) -> pd.DataFrame:
 
 
 def append_scores(csv_path: str | Path, rows: list[JSON]) -> pd.DataFrame:
-    """Append rows to registry_scores.csv (created with the header when missing); returns the whole table."""
+    """Append rows to registry_scores.csv (created with the header when missing); returns the whole table.
+    Rows whose (gw, kind, entry_id) is already in the CSV are dropped: existing rows (e.g. GW9 status=missing)
+    are never duplicated or rewritten."""
     path = Path(csv_path)
     old = pd.read_csv(path) if path.exists() and path.stat().st_size else scores_frame([])
+    old = old.reindex(columns=list(SCORE_COLUMNS))
     new = scores_frame(rows)
+    if not old.empty and not new.empty:
+        seen = set(_keys(old))
+        new = new[[k not in seen for k in _keys(new)]]
     out = new if old.empty else pd.concat([old, new], ignore_index=True)
     out = out.reindex(columns=list(SCORE_COLUMNS)).sort_values(
         ["gw", "kind", "entry_id"], kind="stable", na_position="first"
@@ -473,6 +542,12 @@ def append_scores(csv_path: str | Path, rows: list[JSON]) -> pd.DataFrame:
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
     return out
+
+
+def _keys(df: pd.DataFrame) -> list[tuple[int, str, int]]:
+    gw = pd.to_numeric(df["gw"], errors="coerce").fillna(-1).astype(int)
+    eid = pd.to_numeric(df["entry_id"], errors="coerce").fillna(-1).astype(int)
+    return list(zip(gw, df["kind"].astype(str), eid, strict=True))
 
 
 def scored_gws(csv_path: str | Path) -> set[int]:

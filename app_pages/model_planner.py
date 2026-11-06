@@ -266,8 +266,9 @@ def _shadow_section() -> None:
     n = len(registry.REGISTRY_ENTRY_IDS)
     st.subheader("How the planner is being tested")
     st.markdown(
-        "- **Before every deadline** the shared-data bundle built 30-90 minutes before it is kept as the "
-        "scored snapshot: the xP table as issued and, for a fixed roster of "
+        "- **Before every deadline** the scored snapshot is the last bundle published between 12 hours and "
+        "30 minutes before the deadline; its lead time is recorded. It holds the xP table as issued and, "
+        "for a fixed roster of "
         f"{n} public teams, the planner's proposals from their planning state at that moment: "
         "(a) best XI, captain and vice without transfers, (b) the next gameweek with up to 2 transfers "
         "(4-point hits allowed), (c) a 5-gameweek transfer path with free-transfer banking.\n"
@@ -275,7 +276,8 @@ def _shadow_section() -> None:
         "frozen baseline (form per 90 x availability); per team, the captain's points against the best "
         "captain in the squad and the manager's own captain, and the planned line-up's points (automatic "
         "substitutions, armband, net of hits for (b) and (c)) against the baseline and the manager.\n"
-        "- **Every week counts:** a deadline without a snapshot is recorded as missing, never skipped. The "
+        "- **Every week counts:** a deadline without a snapshot is recorded as missing, never skipped "
+        "(GW9 is recorded as missing because no bundle landed in the then 60-minute window). The "
         "proposals stay hidden until this record shows whether they help."
     )
     if PLANNER_ERROR:
@@ -284,10 +286,10 @@ def _shadow_section() -> None:
 
 def _trajectories_section() -> None:
     """Four virtual managers (fpl_rocket.trajectories): scored weeks only; a GW's choices appear after it."""
-    st.subheader(f"Four virtual managers (prospective, from GW{registry.REGISTRY_START_GW})")
+    st.subheader("Four virtual managers (prospective, from GW10)")
     st.markdown(
         "Four virtual FPL managers started from the same squad (the most-owned legal 15 under 100.0 at the "
-        f"GW{registry.REGISTRY_START_GW} deadline) and play every gameweek without chips: **Model, "
+        "GW10 deadline, the first with a snapshot) and play every gameweek without chips: **Model, "
         "aggressive** (the planner on the model's xP, 3-gameweek horizon, up to 2 transfers, hits allowed), "
         "**Model, restrained** (same xP; in each gameweek at most as many transfers as it has free transfers "
         "banked under the game's rules, up to 5, and never a hit: it can save a transfer when nothing is "
@@ -304,8 +306,8 @@ def _trajectories_section() -> None:
     if s is None:
         why = f" ({reason})" if reason and reason != "no scores yet" else ""
         st.caption(
-            f"No scores yet{why}; the first scored gameweek is GW{registry.REGISTRY_START_GW}, once it is "
-            "finished and its data checked."
+            f"No scores yet{why}; the first scored gameweek is GW10, once it is finished and its data "
+            "checked."
         )
         return
     st.markdown(f"Last scored: **GW{s['gw']}**")
@@ -352,9 +354,11 @@ def _trajectories_section() -> None:
 def _registry_section() -> None:
     st.subheader("Prospective registry")
     st.caption(
-        "The scored snapshot is the bundle published 30-90 minutes before each deadline: its xP and the "
+        "The scored snapshot is the last bundle published between 12 hours and 30 minutes before the "
+        "deadline; its lead time is recorded. Its xP and the "
         f"plans (a), (b) and (c) of a fixed roster of {len(registry.REGISTRY_ENTRY_IDS)} teams are scored "
-        "after the gameweek against a frozen baseline (form per 90 x availability). Missing weeks count."
+        "after the gameweek against a frozen baseline (form per 90 x availability). Missing weeks count: "
+        "GW9 is recorded as missing because no bundle landed in the then 60-minute window."
     )
     scores, reason = data.registry_scores()
     latest = registry.latest_scores(scores)
@@ -372,7 +376,12 @@ def _registry_section() -> None:
     st.markdown(f"Last scored: **GW{latest['gw']}** (bundle {xp_row.get('bundle_id')})")
     st.caption(
         f"Scored snapshot: model {xp_row.get('model_version') or '?'} · "
-        f"bundle {xp_row.get('bundle_id') or '?'}."
+        f"bundle {xp_row.get('bundle_id') or '?'}"
+        + (
+            f" · {float(xp_row['lead_time_minutes']):.0f} min before the deadline."
+            if pd.notna(xp_row.get("lead_time_minutes"))
+            else "."
+        )
     )
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("xP RMSE (model)", f"{xp_row.get('rmse_model', float('nan')):.2f}")

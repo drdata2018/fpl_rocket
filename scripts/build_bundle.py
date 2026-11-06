@@ -91,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     total = sum(f["bytes"] for f in m["files"]) + (Path(path) / "manifest.json").stat().st_size
     print(f"bundle {m['bundle_id']} at {path}: {total / 1024:.0f} KiB, built in {elapsed:.0f} s")
     print(
-        f"  next GW{m['next_event']} deadline {m['next_deadline_time']} pre_deadline={m['pre_deadline']};"
+        f"  next GW{m['next_event']} deadline {m['next_deadline_time']} lead {m.get('lead_time_minutes')} min"
+        f" pre_deadline={m['pre_deadline']};"
         f" element_history {m['element_history_source']} ({m['element_history_reason']});"
         f" summaries missing {len(m['element_summary_missing'])}/{m['element_summary_requested']}"
     )
@@ -123,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(f"next_event={m['next_event'] or ''}\n")
             fh.write(f"pre_deadline={'true' if m['pre_deadline'] else 'false'}\n")
             fh.write(f"model_version={m.get('model_version') or ''}\n")
+            lead = m.get("lead_time_minutes")
+            fh.write(f"lead_time_minutes={'' if lead is None else lead}\n")
     return 0
 
 

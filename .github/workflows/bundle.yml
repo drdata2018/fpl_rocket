@@ -1,9 +1,19 @@
-# Shared-data bundle (docs/PLAN_v2.md section 2): HOURLY at :40 (offset from the spike probe at :17) and on
-# demand (Actions -> bundle -> Run workflow). Builds one immutable bundle and publishes it as a GitHub Release:
+# Shared-data bundle (docs/PLAN_v2.md section 2): cron every 20 minutes (:05, :25, :45; GitHub actually runs a
+# scheduled workflow far less often), on demand (Actions -> bundle -> Run workflow) and on any push to the branch
+# `trigger-bundle` (forces a bundle without an API token:
+#   git commit --allow-empty -m "trigger bundle" && git push origin HEAD:trigger-bundle -f).
+# Whatever triggers it, the job always checks out and runs `main`. Runs never overlap (concurrency group).
+# Builds one immutable bundle and publishes it as a GitHub Release:
 #   bundle-<bundle_id>     every run, marked "latest" (the app reads releases/latest/download/manifest.json)
-#   deadline-gw<N>         also, when the manifest says pre_deadline (bundle created 30-90 minutes before GW N's
-#                          deadline); kept permanently = the scored snapshot for the prospective registry. If the
-#                          GitHub cron delay leaves no bundle in that window, the week is recorded as missing.
+#   deadline-gw<N>         also, when the manifest says pre_deadline: 30 min <= (deadline - created_at) <= 12 h.
+#                          EVERY such bundle creates or updates deadline-gw<N> (assets replaced with --clobber,
+#                          title and notes edited): the scored snapshot is the LAST bundle published between
+#                          12 hours and 30 minutes before the deadline, its lead time recorded
+#                          (manifest lead_time_minutes; registry_meta.json / trajectories_* also list the
+#                          superseded_bundles). Kept permanently. (Until GW9 the window was 30-90 minutes and
+#                          no bundle landed in it for GW9, which is recorded as missing.)
+#                          If this run's trajectories or registry step failed and the release already exists,
+#                          it is left untouched (an earlier complete snapshot is never replaced by a partial one).
 # API load stays polite: the 668 element-summary calls are made only when the previous release's
 # element_history is older than 6 h, a GW has finished since, or there is no previous release; otherwise it is
 # reused (manifest: element_history_source = fetched | reused:<bundle_id>).
@@ -11,23 +21,20 @@
 # (cached) + the current season from the bundle, N = 4000 joint simulations (model.config.BUNDLE_N_SIMS). The
 # app reads xp.parquet only (next GW and next-3-GW sums, P(play) bands), never xp_sims / xp_fixtures.
 # Availability news (fpl_rocket.news) is on by default in build_bundle.py (--no-news turns it off).
-# Prospective registry (fpl_rocket.registry): for the pre-deadline bundle, scripts/registry_write.py adds
-# registry_xp.parquet / registry_plans.json / registry_meta.json to the deadline-gw<N> release (scored later
-# by registry_score.yml): the xp table as issued and the shadow planner's objectives (a), (b), (c) for the
-# roster. The step runs AFTER bundle-<id> is published, only for the pre-deadline bundle, with
-# continue-on-error and its own timeout: if it fails, deadline-gw<N> is published without the registry files
-# and the week scores as missing.
-# Virtual managers (fpl_rocket.trajectories): for the pre-deadline bundle (GW >= 9), BEFORE the registry step,
-# scripts/trajectories_write.py loads the previous state from the latest earlier deadline-gw<k> release and
-# writes trajectories_state.json / trajectories_plans.json (four policies from one start squad) into
-# deadline-gw<N>; continue-on-error with its own timeout: a failure leaves the week to be scored as missing.
-# Releases are created as drafts, filled with every asset, then published, so readers never see a release
-# without its files. Retention: bundle-* releases and tags older than 48 hours are deleted; deadline-* never.
+# Virtual managers (fpl_rocket.trajectories), pre-deadline bundles only (GW >= 9): scripts/trajectories_write.py
+# loads the previous state from the latest deadline-gw<k> release with k < N (never deadline-gw<N> itself, so a
+# re-run recomputes GW N from the same start) and writes trajectories_state.json / trajectories_plans.json.
+# Prospective registry (fpl_rocket.registry), pre-deadline bundles only: scripts/registry_write.py writes
+# registry_xp.parquet / registry_plans.json / registry_meta.json (scored later by registry_score.yml). Both
+# steps run AFTER bundle-<id> is published, with continue-on-error and their own timeouts.
+# Retention: bundle-* releases and tags older than 48 hours are deleted; deadline-* never.
 name: bundle
 
 on:
   schedule:
-    - cron: "40 * * * *"
+    - cron: "5,25,45 * * * *"
+  push:
+    branches: [trigger-bundle]
   workflow_dispatch:
 
 permissions:
@@ -45,6 +52,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Target commit (main, whatever branch triggered the run)
+        run: echo "MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@v6
 
@@ -76,14 +88,15 @@ jobs:
           DIR: ${{ steps.build.outputs.path }}
           BUNDLE_ID: ${{ steps.build.outputs.bundle_id }}
           NEXT_EVENT: ${{ steps.build.outputs.next_event }}
+          LEAD: ${{ steps.build.outputs.lead_time_minutes }}
           PRE_DEADLINE: ${{ steps.build.outputs.pre_deadline }}
           MODEL_VERSION: ${{ steps.build.outputs.model_version }}
         run: |
           set -euo pipefail
           assets=("$DIR"/*.parquet "$DIR/manifest.json")
           tag="bundle-$BUNDLE_ID"
-          notes="Shared-data bundle $BUNDLE_ID (next GW${NEXT_EVENT:-none}, pre_deadline=$PRE_DEADLINE, model ${MODEL_VERSION:-none}). See manifest.json for checksums."
-          gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" --title "Bundle $BUNDLE_ID" --notes "$notes"
+          notes="Shared-data bundle $BUNDLE_ID (next GW${NEXT_EVENT:-none}, lead ${LEAD:-?} min, pre_deadline=$PRE_DEADLINE, model ${MODEL_VERSION:-none}). See manifest.json for checksums."
+          gh release create "$tag" "${assets[@]}" --draft --target "$MAIN_SHA" --title "Bundle $BUNDLE_ID" --notes "$notes"
           gh release edit "$tag" --draft=false --latest
 
       - name: Virtual managers (pre-deadline bundle only, GW >= 9; a failure records the week as missing)
@@ -104,27 +117,43 @@ jobs:
           DIR: ${{ steps.build.outputs.path }}
         run: uv run --no-sync python scripts/registry_write.py --bundle "$DIR" --out data/registry --archive data/archive/all_gws.parquet
 
-      - name: Publish release deadline-gw<N> (pre-deadline bundle only; replaces an earlier one for the same GW)
+      - name: Publish release deadline-gw<N> (every pre-deadline bundle; create or update, last one wins)
         if: steps.build.outputs.pre_deadline == 'true' && steps.build.outputs.next_event != ''
         env:
           DIR: ${{ steps.build.outputs.path }}
           BUNDLE_ID: ${{ steps.build.outputs.bundle_id }}
           NEXT_EVENT: ${{ steps.build.outputs.next_event }}
+          LEAD: ${{ steps.build.outputs.lead_time_minutes }}
+          TRAJ_OUTCOME: ${{ steps.trajectories.outcome }}
+          REG_OUTCOME: ${{ steps.registry.outcome }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           # bundle files + the prospective-registry assets (registry_xp.parquet, registry_plans.json,
           # registry_meta.json) and the virtual managers (trajectories_state.json, trajectories_plans.json)
-          # when those steps succeeded
           assets=("$DIR"/*.parquet "$DIR/manifest.json" data/registry/registry_* data/registry/trajectories_*)
           tag="deadline-gw$NEXT_EVENT"
+          title="Deadline GW$NEXT_EVENT (bundle $BUNDLE_ID, ${LEAD} min before)"
+          notes="Scored snapshot for GW$NEXT_EVENT: the last bundle published between 12 hours and 30 minutes before the deadline. This one: bundle $BUNDLE_ID, created $LEAD minutes before the deadline; a later bundle in the window replaces these assets. Never pruned."
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release delete "$tag" --cleanup-tag --yes
+            if [[ "$TRAJ_OUTCOME" != "success" || "$REG_OUTCOME" != "success" ]]; then
+              echo "::warning::$tag exists and this run's trajectories ($TRAJ_OUTCOME) / registry ($REG_OUTCOME) step failed: release left unchanged"
+              exit 0
+            fi
+            echo "updating $tag with bundle $BUNDLE_ID (${#assets[@]} assets, --clobber)"
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" --title "$title" --notes "$notes" --draft=false --latest=false
+          else
+            echo "creating $tag with bundle $BUNDLE_ID (${#assets[@]} assets)"
+            if gh release create "$tag" "${assets[@]}" --draft --target "$MAIN_SHA" --title "$title" --notes "$notes"; then
+              gh release edit "$tag" --draft=false --latest=false
+            else
+              echo "create failed (release appeared meanwhile?): updating instead"
+              gh release upload "$tag" "${assets[@]}" --clobber
+              gh release edit "$tag" --title "$title" --notes "$notes" --draft=false --latest=false
+            fi
           fi
-          gh release create "$tag" "${assets[@]}" --draft --target "$GITHUB_SHA" \
-            --title "Deadline GW$NEXT_EVENT (bundle $BUNDLE_ID)" \
-            --notes "Bundle created 30-90 minutes before the GW$NEXT_EVENT deadline: the scored snapshot. Never pruned."
-          gh release edit "$tag" --draft=false --latest=false
+          gh release view "$tag" --json assets --jq '.assets[].name'
 
       - name: Retention (delete bundle-* releases and tags older than 48 hours; never deadline-*)
         run: |
