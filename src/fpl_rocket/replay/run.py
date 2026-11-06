@@ -102,11 +102,17 @@ def run_season(
     require_cache: bool = False,
     policies: dict[str, Policy] | None = None,
     forecast_hook: Callable[[forecast.Forecasts, Any], forecast.Forecasts] | None = None,
+    model_seed: Callable[[int], int] | None = None,
+    rules_hook: Callable[[Any], Any] | None = None,
 ) -> pd.DataFrame:
     """`require_cache`: stop when a forecast is not in the cache (baseline verification). `policies` /
     `forecast_hook` (fc, inputs) -> fc: diagnostic variants only (fpl_rocket.replay.variants); the defaults
-    are the frozen policies and forecasts."""
+    are the frozen policies and forecasts. `model_seed` (gw -> seed): the Monte Carlo seed the hook's model
+    table was simulated with, recorded in the decision log (seed diagnostic; default the config seed + gw).
+    `rules_hook` (rules) -> rules: a diagnostic change of the season's rules (variants only)."""
     rules = season_rules(season)
+    if rules_hook is not None:
+        rules = rules_hook(rules)
     out = Path(out_dir) / season
     out.mkdir(parents=True, exist_ok=True)
     todo = [n for n in policy_names if not (out / f"{n}.done").exists()]
@@ -150,7 +156,10 @@ def run_season(
                         "deadline": inp.deadline,
                         "inputs": manifest,
                         "policy": {"name": name, "version": pol.version, "settings": pol.settings()},
-                        "model": {"version": MODEL_BASE_VERSION, "seed": DEFAULT_CONFIG.seed + gw}
+                        "model": {
+                            "version": MODEL_BASE_VERSION,
+                            "seed": DEFAULT_CONFIG.seed + gw if model_seed is None else int(model_seed(gw)),
+                        }
                         if pol.source == "model"
                         else None,
                         "rules_version": rules.version,

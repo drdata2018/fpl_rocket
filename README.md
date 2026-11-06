@@ -311,6 +311,33 @@ uv run python -I scripts/rank_map.py fetch && uv run python -I scripts/rank_map.
   FPL numbers only). Placements say where a total would have ranked; the replay policies never miss a week,
   real managers include abandoned teams.
 
+## Measurement on baseline-v0 (step 4e; diagnostics only, nothing changes a frozen policy)
+
+```bash
+uv run python -I scripts/run_attribution.py --seasons 2024-25 2025-26 --out data/replays/attribution_4e/reconciliation \
+    --variants oct_inputs oct_conditions oct_conditions_known flags_off_chips_off chips_off
+uv run python -I scripts/run_attribution.py --seasons 2025-26 --variants oct_inputs_no_topup --phases runs \
+    --out data/replays/attribution_4e/reconciliation_extra
+uv run python -I scripts/run_attribution.py --seasons 2021-22 2022-23 2023-24 2024-25 2025-26 \
+    --variants captain_swap --phases runs report --out data/replays/attribution_4e/captain_swap
+uv run python -I scripts/reconciliation_report.py          # -> data/replays/attribution_4e/RECONCILIATION.md
+uv run python -I scripts/run_seeds.py                       # -> data/replays/seed_4e/SEEDS.md + CSVs
+uv run python -I scripts/decompose_replay.py                # -> <baseline run>/DECOMPOSITION.md + CSVs
+```
+
+- Reconciliation (`variants.RECONCILIATION`): October's matched replay (most-owned start, no chips, no flags,
+  fixtures as played, its own predictions) inside the blind engine, then one baseline-v0 condition restored per
+  row. Rows are single path-dependent replays, never additive contributions.
+- `variants.CAPTAIN_SWAP`: each planner policy keeps its squad path and XI but captains by the other policy's
+  xP (the triple-captain trigger reads that xP too); the path can change only through chip timing.
+- `replay/seeds.py`: the seed only drives the Monte Carlo simulation (the fit is seed-free); 8 extra seeds
+  (`config seed + 100000 k + gw`) re-predicted from one refit per (season, GW), cached in
+  `data/replay_inputs/seed_cache/` (seed 0 must equal the frozen forecast cache). Computational variation
+  only, not extra seasons.
+- `replay/decompose.py`: per-GW line-up / captain / chip components (convention in the module docstring;
+  they add up to the engine's net in every row), leave-largest-k-out, captain statistics, predicted vs
+  realised captain margins, and the top-10k sample's most-captained player (after the fact).
+
 ## Archive and backtest
 
 ```bash

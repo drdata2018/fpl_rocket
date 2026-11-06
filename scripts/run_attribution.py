@@ -12,6 +12,10 @@ runs    one process per (variant, season); a variant replays only the policies i
         imposed_start: MINIMAL_MODEL; form_flags_off: FORM_RESTRAINED; the rest: both); the unchanged policy
         keeps its baseline-v0 total (identical by construction: same inputs, same code)
 report  <out>/ATTRIBUTION.md + attribution.csv (season totals, MODEL minus FORM, changes vs baseline-v0)
+
+Step 4e variants (variants.RECONCILIATION, variants.CAPTAIN_SWAP) run the same way: oct_* impose the October
+matched replay's GW1 squad (matched.most_owned_initial_squad on the archive) and oct_inputs reads October's
+prediction cache (--pred-cache, default data/backtests/pred_cache_3g) and the archive (--archive).
 """
 
 from __future__ import annotations
@@ -38,8 +42,34 @@ from fpl_rocket.replay import run, variants  # noqa: E402
 
 CACHE = I.INPUTS_DIR / "forecast_cache"
 BASELINE_RUN = ROOT / "data" / "replays" / "20261106T151927Z"
+ARCHIVE = ROOT / "data" / "archive" / "all_gws.parquet"
+OCTOBER_PRED_CACHE = ROOT / "data" / "backtests" / "pred_cache_3g"
 PAIR = ("minimal_model", "form_restrained")
 _STORE: dict[str, I.HistoryStore] = {}
+_ARCHIVE: dict[str, pd.DataFrame] = {}
+
+
+def _archive(path: str | Path = ARCHIVE) -> pd.DataFrame:
+    key = str(path)
+    if key not in _ARCHIVE:
+        _ARCHIVE[key] = pd.read_parquet(key)
+    return _ARCHIVE[key]
+
+
+def october_squad(season: str, archive: str | Path = ARCHIVE) -> list[int]:
+    """The October matched replay's GW1 squad (run_matched --start most_owned)."""
+    from fpl_rocket import matched
+
+    squad, _ = matched.most_owned_initial_squad(matched.season_data(_archive(archive), season))
+    return sorted(int(e) for e in squad)
+
+
+def october_inputs(season: str, pred_cache: str | Path, archive: str | Path = ARCHIVE) -> dict:
+    import pickle
+
+    with (Path(pred_cache) / f"{season}.pkl").open("rb") as fh:
+        cache = pickle.load(fh)  # noqa: S301 - our own cache file
+    return variants.october_inputs(cache, _archive(archive), season)
 
 
 def _store() -> I.HistoryStore:
@@ -87,17 +117,29 @@ def _tables_task(season: str, gw: int) -> tuple[str, int, float, float]:
     return season, gw, diff, time.perf_counter() - t0
 
 
-def _run_task(vname: str, season: str, out: str, baseline_run: str, log_path: str) -> tuple[str, str]:
+def _run_task(
+    vname: str, season: str, out: str, baseline_run: str, log_path: str, pred_cache: str = ""
+) -> tuple[str, str]:
     log = _logger(Path(log_path))
     v = variants.by_name(vname)
-    imposed = imposed_squad(Path(baseline_run), season) if v.imposed_start else None
+    imposed = None
+    if v.imposed_start:
+        imposed = (
+            october_squad(season)
+            if v.imposed_rule == "october"
+            else imposed_squad(Path(baseline_run), season)
+        )
+        log(f"[{vname}] {season} imposed GW1 squad ({v.imposed_rule}): {imposed}")
     pols = variants.make_variant_policies(v, imposed)
+    october = october_inputs(season, pred_cache or OCTOBER_PRED_CACHE) if v.inputs == "october" else None
 
     def hook(fc, inp):
         tabs = None
         if v.needs_model_tables():
-            tabs = variants.load_or_build_tables(inp, run.forecast_digest(inp), build=False)
-        return variants.apply(v, fc, inp, tabs)
+            tabs = variants.load_or_build_tables(
+                inp, run.forecast_digest(inp), build=False, need=v.table_keys()
+            )
+        return variants.apply(v, fc, inp, tabs, october)
 
     def vlog(msg: str) -> None:
         log(f"[{vname}] {msg}")
@@ -112,6 +154,7 @@ def _run_task(vname: str, season: str, out: str, baseline_run: str, log_path: st
         require_cache=True,
         policies=pols,
         forecast_hook=hook,
+        rules_hook=None if v.ft_topup else (lambda r: variants.rules_for(v, r)),
     )
     return vname, season
 
@@ -203,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=5)
     ap.add_argument("--out", default=None)
     ap.add_argument("--baseline-run", default=str(BASELINE_RUN))
+    ap.add_argument("--pred-cache", default=str(OCTOBER_PRED_CACHE), help="October's prediction cache")
     args = ap.parse_args(argv)
     out = Path(args.out or ROOT / "data" / "replays" / f"attribution_{datetime.now(UTC):%Y%m%dT%H%M%SZ}")
     out.mkdir(parents=True, exist_ok=True)
@@ -226,7 +270,9 @@ def main(argv: list[str] | None = None) -> int:
     if "runs" in args.phases:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
             futs = {
-                pool.submit(_run_task, v.name, s, str(out), args.baseline_run, str(log_path)): (v.name, s)
+                pool.submit(
+                    _run_task, v.name, s, str(out), args.baseline_run, str(log_path), args.pred_cache
+                ): (v.name, s)
                 for v in vs
                 for s in args.seasons
             }
