@@ -1,0 +1,140 @@
+{
+ "at_freeze": {
+  "random": {
+   "overall_rank": {
+    "max": 11161602,
+    "median": 5308383.0,
+    "min": 0,
+    "n": 1500,
+    "p25": 2567119.0,
+    "p75": 8223032.75
+   },
+   "total_points": {
+    "max": 673,
+    "median": 498.0,
+    "min": -79,
+    "n": 1500,
+    "p25": 436.0,
+    "p75": 545.0
+   }
+  },
+  "top10k": {
+   "overall_rank": {
+    "max": 9867,
+    "median": 5013.0,
+    "min": 9,
+    "n": 1500,
+    "p25": 2355.0,
+    "p75": 7346.0
+   },
+   "total_points": {
+    "max": 718,
+    "median": 669.0,
+    "min": 662,
+    "n": 1500,
+    "p25": 665.0,
+    "p75": 676.0
+   }
+  }
+ },
+ "cohort_file": "cohort_20261106.json",
+ "counts": {
+  "random": {
+   "acceptance_rate": 0.9908,
+   "accepted": 1500,
+   "candidates_drawn": 1514,
+   "max_candidates_reached": false,
+   "members": 1500,
+   "rejected_inactive": 14,
+   "rejected_not_found": 0
+  },
+  "top10k": {
+   "canonical_list_size": 10000,
+   "distinct_entries_seen": 10063,
+   "distinct_members": 1500,
+   "entries_rank_or_total_inconsistent": 0,
+   "members": 1500,
+   "page_requests": 400,
+   "pages_per_snapshot": 200,
+   "positions_drawn": 1500,
+   "rows_seen": 20000,
+   "snapshots": 2,
+   "standings_last_updated_data": [
+    "2026-11-06T14:48:58Z",
+    "2026-11-06T14:48:59Z",
+    "2026-11-06T14:49:02Z",
+    "2026-11-06T14:54:17Z",
+    "2026-11-06T14:54:18Z",
+    "2026-11-06T14:54:20Z",
+    "2026-11-06T14:55:57Z",
+    "2026-11-06T15:54:04Z",
+    "2026-11-06T15:54:05Z",
+    "2026-11-06T15:54:09Z",
+    "2026-11-06T15:59:06Z",
+    "2026-11-06T15:59:08Z",
+    "2026-11-06T15:59:09Z",
+    "2026-11-06T15:59:37Z"
+   ]
+  }
+ },
+ "freeze_id": "20261106",
+ "freeze_started_utc": "2026-11-06T14:52:40+00:00",
+ "freeze_time_utc": "2026-11-06T16:33:26+00:00",
+ "last_finished_data_checked": true,
+ "last_finished_gw": 9,
+ "next_deadline": "2026-11-06T18:30:00Z",
+ "next_gw": 10,
+ "requests": {
+  "by_status": {
+   "200": 4631,
+   "error": 4
+  },
+  "runs": [
+   {
+    "by_status": {
+     "200": 3210
+    },
+    "ended_at": "2026-11-06T15:56:41+00:00",
+    "requests": 3210,
+    "seconds": 3840.8,
+    "started_at": "2026-11-06T14:52:40+00:00",
+    "status": "complete"
+   },
+   {
+    "by_status": {
+     "200": 821,
+     "error": 4
+    },
+    "ended_at": "2026-11-06T16:16:10+00:00",
+    "requests": 825,
+    "seconds": 1022.5,
+    "started_at": "2026-11-06T15:59:08+00:00",
+    "status": "interrupted: FPLAPIError: FPL API entry/6648534/history/ failed (status=None) ConnectionError(MaxRetryError('HTTPSConnectionPool(host=\\'fantasy.premierleague.com\\', port=443): Max retries exceeded with url: /api/entry/6648534/history/ (Caused by NameResolutionError(\"HTTPSConnection(host=\\'fantasy.premierleague.com\\', port=443): Failed to resolve \\'fantasy.premierleague.com\\' ([Errno 11001] getaddrinfo failed)\"))'))"
+   },
+   {
+    "by_status": {
+     "200": 600
+    },
+    "ended_at": "2026-11-06T16:33:26+00:00",
+    "requests": 600,
+    "seconds": 699.9,
+    "started_at": "2026-11-06T16:21:46+00:00",
+    "status": "complete"
+   }
+  ],
+  "seconds": 5563.2,
+  "total": 4635
+ },
+ "rules": {
+  "at_freeze": "overall_rank, total_points, value, bank = the history row of the last finished GW; chips_used = history chips with event <= that GW; nothing from later GWs is read",
+  "privacy": "entry ids and FPL numbers only: no names, no regions",
+  "random": "candidate ids drawn uniformly without replacement from 1..total_players (bootstrap at the freeze); kept if entry/{id}/history/ exists (404 = not_found) and has a row for each of the last 3 finished gameweeks (else inactive); the first 1500 kept in draw order",
+  "scoring": "per finished, data-checked GW after the freeze GW: net points = points - event_transfers_cost; members are never dropped (no_row / not_found rows keep empty points)",
+  "top10k": "all 200 pages of the top 10000 of leagues-classic/314 fetched in 2 snapshots (the order within ties changes between fetches); canonical list = the distinct entries with rank <= 10000 seen in any snapshot, ordered by (rank, entry id), cut at 10000; 1500 positions drawn uniformly without replacement from 1..len(list); no activity rule"
+ },
+ "seed": 20261106,
+ "seed_scheme": "random.Random(int(sha256(f'{seed}:{cohort}').hexdigest()[:16], 16)), cohort in {random, top10k}",
+ "sha256": "8c625534bfc9de27c0974303168038b628d7ed92e4c9c2c9e05df2ffc22f51c5",
+ "total_players": 11246834,
+ "units": "value and bank in tenths of a million (FPL API units)"
+}
