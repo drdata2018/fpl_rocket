@@ -27,3 +27,7 @@ data/backtests/
 # As-known archive (step 4a) and its raw downloads (never committed)
 data/asknown/
 data/raw/
+
+# Blind replay inputs and outputs (step 4b; never committed)
+data/replay_inputs/
+data/replays/

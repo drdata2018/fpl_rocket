@@ -5,7 +5,8 @@ player's GW points from `event/{gw}/live` stats (scripts/reconcile_points.py, te
 
 Scoring (per fixture; a double gameweek is scored fixture by fixture and summed):
 - Appearance: 1 point for 1-59 minutes, 2 points for 60+ minutes, nothing at all if minutes == 0.
-- Goal: GK/DEF 6, MID 5, FWD 4.  Assist: 3.
+- Goal: GK 10, DEF 6, MID 5, FWD 4 (GK 10 from 2024-25: game_config.scoring.goals_scored.GKP = 10 in every
+  2026-27 bootstrap; https://premierleague.com/news/4059044 - corrected in step 4b, it was 6).  Assist: 3.
 - Clean sheet (requires 60+ minutes): GK/DEF 4, MID 1, FWD 0.
 - Every 3 saves: 1 (GK).  Penalty saved: 5.  Penalty missed: -2.
 - Every 2 goals conceded: -1 (GK/DEF).  Yellow: -1.  Red: -3.  Own goal: -2.
@@ -28,173 +29,80 @@ Transfers:
 - Free hit: the squad reverts after the GW.
 - Selling price = purchase + floor((current - purchase) / 2) when current > purchase, else current (tenths).
 
-Chips: windows (two sets per half-season) are read from bootstrap['chips'], never hard-coded.
+Chips: windows (two sets per half-season) are read from bootstrap['chips'] for the live app (chip_windows);
+the replay uses CHIPS below = the same windows as recorded in data/asknown/rules/2026-27.json.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from .common import (
+    DEF,
+    FORMATION,
+    FWD,
+    GK,
+    MID,
+    POSITIONS,
+    ChipWindow,
+    ScoringTable,
+    SeasonRules,
+    SpecialEvents,
+    SquadRules,
+    TransferRules,
+    chip_windows,
+    fixture_stats_from_explain,
+    season_functions,
+)
+
+__all__ = [
+    "DEF",
+    "FWD",
+    "GK",
+    "MID",
+    "POSITIONS",
+    "ScoringTable",
+    "SquadRules",
+    "TransferRules",
+    "chip_windows",
+    "fixture_stats_from_explain",
+]
 
 SEASON = "2026-27"
-RULES_VERSION = "2026-27.1"
-
-GK, DEF, MID, FWD = 1, 2, 3, 4
-POSITIONS = {GK: "GKP", DEF: "DEF", MID: "MID", FWD: "FWD"}
-
-
-@dataclass(frozen=True)
-class ScoringTable:
-    """Points per event, keyed by element_type where position-dependent."""
-
-    appearance_short: int = 1  # 1..59 minutes
-    appearance_long: int = 2  # >= long_minutes
-    long_minutes: int = 60
-    goal: dict[int, int] = field(default_factory=lambda: {GK: 6, DEF: 6, MID: 5, FWD: 4})
-    assist: int = 3
-    clean_sheet: dict[int, int] = field(default_factory=lambda: {GK: 4, DEF: 4, MID: 1, FWD: 0})
-    saves_per_point: int = 3
-    save_point_positions: frozenset[int] = frozenset({GK})
-    penalty_save: int = 5
-    penalty_miss: int = -2
-    goals_conceded_per_point: int = 2
-    goals_conceded_point: int = -1
-    goals_conceded_positions: frozenset[int] = frozenset({GK, DEF})
-    yellow: int = -1
-    red: int = -3
-    own_goal: int = -2
-    defcon_points: int = 2
-    # threshold applied to the live stat `defensive_contribution` (raw count); None = not eligible
-    defcon_threshold: dict[int, int | None] = field(
-        default_factory=lambda: {GK: None, DEF: 10, MID: 12, FWD: 12}
-    )
-    # raw stats summed into the count, documented for model features
-    defcon_components: dict[int, tuple[str, ...]] = field(
-        default_factory=lambda: {
-            GK: (),
-            DEF: ("clearances_blocks_interceptions", "tackles"),
-            MID: ("clearances_blocks_interceptions", "tackles", "recoveries"),
-            FWD: ("clearances_blocks_interceptions", "tackles", "recoveries"),
-        }
-    )
-
-
-@dataclass(frozen=True)
-class TransferRules:
-    """Free-transfer state machine parameters."""
-
-    free_per_gw: int = 1
-    max_bank: int = 5  # 1 + game_settings.max_extra_free_transfers (4)
-    hit_cost: int = 4
-    transfers_cap: int = 20  # game_settings.transfers_cap
-    chip_weeks_free: frozenset[str] = frozenset({"wildcard", "freehit"})
-    # balance entering the GW after a WC/FH week:
-    #   "carry"        -> same balance as entering the chip week (no +1)       <- observed 2026-27
-    #   "carry_accrue" -> balance + 1 (capped)
-    #   "reset_one"    -> 1 (pre-2024 rule)
-    chip_week_policy: str = "carry"
-    reverting_chips: frozenset[str] = frozenset({"freehit"})
-    sell_on_fee: float = 0.5  # game_settings.transfers_sell_on_fee
-
-
-@dataclass(frozen=True)
-class SquadRules:
-    """Squad composition limits."""
-
-    size: int = 15
-    per_position: dict[int, int] = field(default_factory=lambda: {GK: 2, DEF: 5, MID: 5, FWD: 3})
-    max_per_team: int = 3
-    budget: int = 1000  # tenths
-
+RULES_VERSION = "2026-27.2"
 
 SCORING = ScoringTable()
 TRANSFERS = TransferRules()
 SQUAD = SquadRules()
-
-
-def _i(stats: dict[str, Any], key: str) -> int:
-    return int(stats.get(key, 0) or 0)
-
-
-def points_from_stats(
-    stats: dict[str, Any], element_type: int, table: ScoringTable = SCORING
-) -> dict[str, int]:
-    """Score ONE fixture's stats for a player of `element_type`; returns a breakdown with 'total'.
-
-    `stats` uses the live-endpoint identifiers (minutes, goals_scored, assists, clean_sheets, saves,
-    penalties_saved, penalties_missed, goals_conceded, yellow_cards, red_cards, own_goals, bonus,
-    defensive_contribution). For a double gameweek use points_from_live (fixture by fixture).
-    """
-    minutes = _i(stats, "minutes")
-    if minutes <= 0:
-        return {"total": 0}
-    long_game = minutes >= table.long_minutes
-    out: dict[str, int] = {
-        "minutes": table.appearance_long if long_game else table.appearance_short,
-        "goals_scored": _i(stats, "goals_scored") * table.goal[element_type],
-        "assists": _i(stats, "assists") * table.assist,
-        "clean_sheets": (_i(stats, "clean_sheets") if long_game else 0) * table.clean_sheet[element_type],
-        "penalties_saved": _i(stats, "penalties_saved") * table.penalty_save,
-        "penalties_missed": _i(stats, "penalties_missed") * table.penalty_miss,
-        "yellow_cards": _i(stats, "yellow_cards") * table.yellow,
-        "red_cards": _i(stats, "red_cards") * table.red,
-        "own_goals": _i(stats, "own_goals") * table.own_goal,
-        "bonus": _i(stats, "bonus"),
-    }
-    if element_type in table.save_point_positions:
-        out["saves"] = _i(stats, "saves") // table.saves_per_point
-    if element_type in table.goals_conceded_positions:
-        conceded = _i(stats, "goals_conceded") // table.goals_conceded_per_point
-        out["goals_conceded"] = conceded * table.goals_conceded_point
-    threshold = table.defcon_threshold[element_type]
-    if threshold is not None and _i(stats, "defensive_contribution") >= threshold:
-        out["defensive_contribution"] = table.defcon_points
-    out = {k: v for k, v in out.items() if v}
-    out["total"] = sum(out.values())
-    return out
-
-
-def fixture_stats_from_explain(explain_fixture: dict[str, Any]) -> dict[str, int]:
-    """Per-fixture raw stat VALUES from one `explain` entry (its points are ignored).
-
-    `explain` lists only stats that scored; an omitted stat is below its scoring threshold, so treating
-    it as 0 cannot change the computed points.
-    """
-    return {s["identifier"]: int(s["value"]) for s in explain_fixture.get("stats", [])}
-
-
-def points_from_live(
-    live_element: dict[str, Any], element_type: int, table: ScoringTable = SCORING
-) -> dict[str, int]:
-    """Score one element of event/{gw}/live, fixture by fixture when it played more than once."""
-    explain = live_element.get("explain") or []
-    if len(explain) <= 1:
-        return points_from_stats(live_element["stats"], element_type, table)
-    total: dict[str, int] = {}
-    for fx in explain:
-        for k, v in points_from_stats(fixture_stats_from_explain(fx), element_type, table).items():
-            total[k] = total.get(k, 0) + v
-    return total
-
-
-def selling_price(purchase: int, current: int, sell_on_fee: float = TRANSFERS.sell_on_fee) -> int:
-    """Selling price in tenths: purchase + floor(fee * gain) when the price rose, else the current price."""
-    if current > purchase:
-        return purchase + int((current - purchase) * sell_on_fee)
-    return current
-
-
-def chip_windows(bootstrap: dict[str, Any]) -> list[dict[str, Any]]:
-    """Chip windows from bootstrap['chips'] (two sets per half-season): name, start/stop event, type."""
-    keys = ("id", "name", "number", "start_event", "stop_event", "chip_type")
-    return [{k: c.get(k) for k in keys} for c in bootstrap.get("chips", [])]
-
-
-def transfer_rules_from_bootstrap(bootstrap: dict[str, Any]) -> TransferRules:
-    """TransferRules with the values discoverable from game_settings overriding the defaults."""
-    gs = bootstrap.get("game_settings", {})
-    return TransferRules(
-        max_bank=1 + int(gs.get("max_extra_free_transfers", TRANSFERS.max_bank - 1)),
-        transfers_cap=int(gs.get("transfers_cap", TRANSFERS.transfers_cap)),
-        sell_on_fee=float(gs.get("transfers_sell_on_fee", TRANSFERS.sell_on_fee)),
-    )
+_API = "data/asknown/rules/2026-27.json (bootstrap chips)"
+CHIPS = (
+    ChipWindow("wildcard", 1, 2, 19, source=_API),
+    ChipWindow("wildcard", 2, 20, 38, source=_API),
+    ChipWindow("freehit", 1, 2, 19, source=_API),
+    ChipWindow("freehit", 2, 20, 38, source=_API),
+    ChipWindow("bboost", 1, 1, 19, source=_API),
+    ChipWindow("bboost", 2, 20, 38, source=_API),
+    ChipWindow("3xc", 1, 1, 19, source=_API),
+    ChipWindow("3xc", 2, 20, 38, source=_API),
+)
+SPECIAL = SpecialEvents()
+SOURCES = {
+    "scoring": "event/{gw}/live reconciliation (tests/test_rules.py, scripts/reconcile_points.py)",
+    "gk_goal_10": "https://premierleague.com/news/4059044 (2024-25 change, unchanged since)",
+    "chips": _API,
+    "chip_week_policy carry": "scripts/ft_hypotheses.py on 300 sampled managers (2026-10-23)",
+}
+KNOWN_UNCERTAIN: tuple[str, ...] = ()
+RULES = SeasonRules(
+    SEASON,
+    RULES_VERSION,
+    SCORING,
+    TRANSFERS,
+    SQUAD,
+    CHIPS,
+    SPECIAL,
+    dict(FORMATION),
+    sources=SOURCES,
+    known_uncertain=KNOWN_UNCERTAIN,
+)
+points_from_stats, points_from_live, selling_price, transfer_rules_from_bootstrap = season_functions(
+    SCORING, TRANSFERS
+)

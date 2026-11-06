@@ -151,7 +151,12 @@ def component_points(
         "bonus": np.asarray(bonus, dtype=float),
         "defcon": np.where(dc_hit, t.defcon_points, 0),
     }
-    return {k: np.where(played, np.asarray(v, dtype=float), 0.0) for k, v in out.items()}
+    # a card shown to an unused substitute counts (rules engine, step 4b reconciliation); everything else
+    # needs minutes
+    return {
+        k: np.asarray(v, dtype=float) if k == "cards" else np.where(played, np.asarray(v, dtype=float), 0.0)
+        for k, v in out.items()
+    }
 
 
 def _allocate(rng: np.random.Generator, n: np.ndarray, weights: np.ndarray) -> np.ndarray:

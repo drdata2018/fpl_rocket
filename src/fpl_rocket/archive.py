@@ -8,7 +8,8 @@ Output: one row per (season, gw, element, fixture) with ARCHIVE_COLUMNS. Ids are
 (players_raw.code), the player's stable id across seasons. Columns a season lacks are null:
     defensive_contribution, clearances_blocks_interceptions, recoveries, tackles: only from 2025-26
     expected_goals / expected_assists / expected_goal_involvements / expected_goals_conceded, starts:
-        from 2022-23 (every season loaded here has them)
+        from 2022-23 (null in 2020-21 and 2021-22: FPL published no xG / starts before 2022-23; those two
+        seasons are loaded for the blind replay, fpl_rocket.replay, which documents its proxies)
 element_type 5 = assistant manager (2024-25 only); model code filters element_type 1-4.
 """
 
@@ -19,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-SEASONS = ("2022-23", "2023-24", "2024-25", "2025-26", "2026-27")
+SEASONS = ("2020-21", "2021-22", "2022-23", "2023-24", "2024-25", "2025-26", "2026-27")
 FILES = ("gws/merged_gw.csv", "players_raw.csv", "teams.csv", "fixtures.csv")
 POSITION_TYPES = {"GK": 1, "GKP": 1, "DEF": 2, "MID": 3, "FWD": 4, "AM": 5}
 

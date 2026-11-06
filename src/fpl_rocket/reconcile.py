@@ -38,3 +38,43 @@ def reconcile_gw(
                 Mismatch(el["id"], et, api_total, breakdown["total"], breakdown, el.get("explain", []))
             )
     return checked, mismatches
+
+
+# ================================================================================ archive, every season
+ARCHIVE_STATS = (
+    "minutes",
+    "goals_scored",
+    "assists",
+    "clean_sheets",
+    "goals_conceded",
+    "own_goals",
+    "penalties_saved",
+    "penalties_missed",
+    "yellow_cards",
+    "red_cards",
+    "saves",
+    "bonus",
+    "defensive_contribution",
+)
+
+
+def reconcile_archive(df: Any, season: str, gws: Any = None) -> Any:
+    """Recompute every per-fixture archive row (fpl_rocket.archive schema) of `season` with that season's
+    scoring table and compare with the row's total_points. Returns a frame: season, gw, element, fixture,
+    element_type, archive, computed, diff (all rows; filter diff != 0 for mismatches)."""
+
+    rules = get_rules(season)
+    s = df[(df["season"] == season) & (df["element_type"].isin((1, 2, 3, 4)))]
+    if gws is not None:
+        s = s[s["gw"].isin(list(gws))]
+    stats = s[[c for c in ARCHIVE_STATS if c in s]].astype("Float64").fillna(0).astype(int)
+    et = s["element_type"].astype(int).to_numpy()
+    computed = [
+        rules.points_from_stats(row, int(t))["total"]
+        for row, t in zip(stats.to_dict("records"), et, strict=True)
+    ]
+    out = s[["season", "gw", "element", "fixture", "element_type"]].copy()
+    out["archive"] = s["total_points"].astype("Float64").fillna(0).astype(int).to_numpy()
+    out["computed"] = computed
+    out["diff"] = out["computed"] - out["archive"]
+    return out.reset_index(drop=True)

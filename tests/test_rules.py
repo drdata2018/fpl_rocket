@@ -42,7 +42,7 @@ def test_recorded_gw7_reconciles_to_zero_mismatches():
         ({"minutes": 60, "clean_sheets": 1}, DEF, 6),
         ({"minutes": 90, "clean_sheets": 1}, MID, 3),
         ({"minutes": 90, "clean_sheets": 1}, FWD, 2),
-        ({"minutes": 90, "goals_scored": 1}, GK, 8),
+        ({"minutes": 90, "goals_scored": 1}, GK, 12),  # GK goal 10 since 2024-25 (game_config, PL news)
         ({"minutes": 90, "goals_scored": 2, "assists": 1}, FWD, 2 + 8 + 3),
         ({"minutes": 90, "saves": 8, "goals_conceded": 5, "penalties_saved": 1}, GK, 2 + 2 - 2 + 5),
         ({"minutes": 90, "goals_conceded": 3, "yellow_cards": 1, "own_goals": 1}, DEF, 2 - 1 - 1 - 2),

@@ -113,7 +113,11 @@ Community Cloud free tier, data jobs run on GitHub Actions and are published as 
 ## Code map
 
 - `src/fpl_rocket/api.py` - FPL API client (browser UA, retries/backoff, optional raw cache).
-- `src/fpl_rocket/rules/` - versioned game rules (`season_2026_27.py`): scoring, transfers, selling price.
+- `src/fpl_rocket/rules/` - versioned game rules, one module per season 2021-22 .. 2026-27 with the same
+  interface (`common.py`: scoring, transfers / free-transfer state machine, chips and windows, special events,
+  sources, KNOWN_UNCERTAIN).
+- `src/fpl_rocket/replay/` - blind replay engine (PLAN_v3 1b-1c): inputs at T, forecasts, engine (legality,
+  scoring), shared chip rule, the four blind policies, decision log + leakage test, report.
 - `src/fpl_rocket/state.py` - planning-state reconstruction (squad, purchase/selling prices, bank, free-transfer range, chips).
 - `src/fpl_rocket/bundle.py` - immutable parquet bundle + `manifest.json` with checksums (element_history,
   round_prices, deadline flags, optional model and news tables).
@@ -257,6 +261,22 @@ cumulative net points since the freeze; members are never dropped: `no_row` / `n
 `cohort_summary.csv` (n, mean, p10/p25/median/p75/p90, chip shares, cumulative versions).
 `cohorts.percentile_of(points, gw, cohort, cumulative=False)` reads the published scores (for the virtual-
 manager pages later; no UI yet).
+
+## Blind replay (PLAN_v3 Phase 1b-1c)
+
+```bash
+uv run python -I scripts/load_archive.py --seasons 2020-21 2021-22   # adds the seasons the replay needs
+uv run python -I scripts/load_live_gws.py                            # current-season GWs the archive lacks
+uv run python -I scripts/reconcile_seasons.py                        # scoring tables vs archive points
+uv run python -I scripts/run_replay.py --seasons 2021-22 2022-23 --workers 6   # -> data/replays/<ts>/
+```
+
+Every package is decided from `asknown.load(season, gw)` + the points rows of matches with kickoff + 3 h <=
+T (T = deadline - 2 h), validated against that season's rules (illegal packages are rejected loudly),
+executed and scored; decisions are logged as JSON lines; a built-in leakage test corrupts everything after T
+for 3 deadlines per season and requires identical packages. `REPORT.md` holds the season tables, chips,
+fallbacks, leakage results, KNOWN_UNCERTAIN rules, paired block-bootstrap comparisons and the within-sample
+percentiles against the sampled managers.
 
 ## Archive and backtest
 

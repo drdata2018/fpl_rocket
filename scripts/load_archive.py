@@ -1,6 +1,6 @@
 """Download the community FPL archive and normalise it to data/archive/all_gws.parquet.
 
-Usage: uv run python -I scripts/load_archive.py [--seasons 2022-23 ... 2026-27] [--out DIR] [--offline]
+Usage: uv run python -I scripts/load_archive.py [--seasons 2020-21 ... 2026-27] [--out DIR] [--offline]
 
 Source: https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data/<season>/ - for each
 season gws/merged_gw.csv, players_raw.csv, teams.csv, fixtures.csv are saved to <out>/<season>/ (gitignored)
@@ -74,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
                 files += download(season, out, session)
         manifest = {"source": BASE, "files": files}
 
-    frames = [load_season_dir(s, out / s) for s in args.seasons]
+    # normalise every season on disk (a download of some seasons must not drop the others from the parquet)
+    on_disk = [s for s in SEASONS if (out / s / "merged_gw.csv").exists()]
+    frames = [load_season_dir(s, out / s) for s in on_disk]
     df = pd.concat(frames, ignore_index=True)
     target = out / "all_gws.parquet"
     df.to_parquet(target, index=False)
