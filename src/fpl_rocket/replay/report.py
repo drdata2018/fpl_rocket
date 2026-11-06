@@ -271,9 +271,14 @@ def percentiles(rows: pd.DataFrame, mgr: pd.DataFrame) -> tuple[pd.DataFrame, pd
         .agg(tier_mean_season=("net", "sum"), gws=("gw", "nunique"))
         .reset_index()
     )
-    pol = rows.groupby(["season", "policy"])["net"].sum().unstack()
-    for p in pol.columns:
-        sums[p] = sums["season"].map(pol[p])
+    # policy totals over the SAME GWs as the tier (the rank tiers have no GW1 sample)
+    covered = tier_mean.groupby(["season", "tier"])["gw"].apply(set).to_dict()
+    for p in sorted(rows["policy"].unique()):
+        r = rows[rows["policy"] == p]
+        sums[p] = [
+            int(r[(r["season"] == s) & r["gw"].isin(covered[(s, t)])]["net"].sum())
+            for s, t in zip(sums["season"], sums["tier"], strict=True)
+        ]
     return w, dist, sums
 
 
@@ -414,7 +419,10 @@ def write_report(out: str | Path, seasons: list[str], policies: list[str] | None
             "GWs\n\n"
         )
         parts.append(_md(dist, "{:.1f}"))
-        parts.append("\nSeason sum of the tier's mean weekly net points vs each policy's season total\n\n")
+        parts.append(
+            "\nSeason sum of the tier's mean weekly net points vs each policy's total over the same GWs "
+            "(the rank tiers have no GW1 sample; the random tier is redrawn each GW)\n\n"
+        )
         parts.append(_md(sums, "{:.0f}"))
         w.to_csv(out / "manager_percentiles_weekly.csv", index=False)
         mgr.to_csv(out / "manager_points.csv", index=False)
