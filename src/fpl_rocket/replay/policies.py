@@ -206,14 +206,19 @@ class Policy:
 
 def _package_from_plan(fc: Forecasts, state: ManagerState, rules: SeasonRules, plan, chip, xp) -> Package:
     gp = plan.first()
-    n = len(gp.transfers_in) if state.squad else 0
+    # transfers = the difference between the plan's GW squad and the owned squad (the planner models a
+    # free-hit week without transfer variables, so its transfer lists are empty there)
+    owned = set(state.squad)
+    t_in = sorted(set(gp.squad) - owned)
+    t_out = sorted(owned - set(gp.squad))
+    n = len(t_in) if state.squad else 0
     hits = rules.hits(fc.gw, state.free_transfers, n, chip)
-    scores = {e: xp.get((e, fc.gw), 0.0) for e in set(gp.squad) | set(state.squad)}
+    scores = {e: xp.get((e, fc.gw), 0.0) for e in set(gp.squad) | owned}
     return Package(
         fc.season,
         fc.gw,
-        list(gp.transfers_in),
-        list(gp.transfers_out) if state.squad else [],
+        t_in,
+        t_out,
         list(gp.xi),
         list(gp.bench),
         int(gp.captain),

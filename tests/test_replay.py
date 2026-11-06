@@ -336,3 +336,32 @@ def test_determinism_and_leak_test_on_recorded_fixtures(tmp_path):
     )
     inp3 = load_inputs("2021-22", GW, HistoryStore(hist3), ak3)
     assert inp3.manifest()["history_digest"] != inp.manifest()["history_digest"]
+
+
+def test_free_hit_plan_transfers_come_from_the_squad_difference():
+    """The planner models a free-hit week without transfer variables: the package must still list the
+    temporary transfers (regression: 2022-23 GW8 was rejected as 'XI is not 11 distinct squad players')."""
+    from types import SimpleNamespace
+
+    from fpl_rocket.replay.policies import _package_from_plan
+
+    rules = season_rules("2025-26")
+    st = state(ft=1)
+    new_squad = sorted((set(TYPES) - {3, 14}) | {16, 21})
+    gp = SimpleNamespace(
+        squad=new_squad,
+        transfers_in=[],
+        transfers_out=[],
+        xi=[1, 16, 4, 5, 6, 8, 9, 10, 11, 13, 21],
+        bench=BENCH,
+        captain=13,
+        vice=8,
+    )
+    plan = SimpleNamespace(
+        first=lambda: gp, status="optimal", reason="", solve_seconds=0.0, time_limited=False
+    )
+    fc = SimpleNamespace(season="2025-26", gw=10)
+    p = _package_from_plan(fc, st, rules, plan, "freehit", {})
+    assert p.transfers_in == [16, 21] and p.transfers_out == [3, 14] and p.hits == 0
+    new, _ = engine.step(rules, st, players(), p, results())
+    assert new.squad == st.squad

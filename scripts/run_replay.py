@@ -107,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
                     log(
                         f"forecasts {i}/{len(futs)} ({s} GW{g} {sec:.0f} s; {time.perf_counter() - t0:.0f} s)"
                     )
+    failed: list[str] = []
     if "seasons" in args.phases:
         with ProcessPoolExecutor(max_workers=min(args.workers, len(args.seasons))) as pool:
             futs = [
@@ -123,7 +124,11 @@ def main(argv: list[str] | None = None) -> int:
                 for s in args.seasons
             ]
             for f in as_completed(futs):
-                log(f"season {f.result()} done")
+                try:
+                    log(f"season {f.result()} done")
+                except Exception as exc:  # noqa: BLE001 - one season's failure is logged loudly, the rest go on
+                    failed.append(repr(exc))
+                    log(f"SEASON FAILED: {exc!r}")
     if "leak" in args.phases:
         with ProcessPoolExecutor(max_workers=min(args.workers, len(args.seasons))) as pool:
             futs = [
@@ -131,13 +136,19 @@ def main(argv: list[str] | None = None) -> int:
                 for s in args.seasons
             ]
             for f in as_completed(futs):
-                log(f"leak test {f.result()} done")
+                try:
+                    log(f"leak test {f.result()} done")
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(repr(exc))
+                    log(f"LEAK TEST FAILED: {exc!r}")
     if "report" in args.phases:
         from fpl_rocket.replay import report
 
         path = report.write_report(out, args.seasons, args.policies)
         log(f"report {path}")
-    return 0
+    if failed:
+        log(f"{len(failed)} failure(s): {failed}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
