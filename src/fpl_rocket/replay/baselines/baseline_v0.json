@@ -1,0 +1,485 @@
+{
+ "name": "baseline_v0",
+ "tag": "baseline-v0",
+ "commit": "7a14ba1999a2b578199f00dd1587cd3f7949edf6",
+ "run": "20261106T151927Z",
+ "notes": [
+  "2021-22..2025-26 decided by the invocation started 2026-11-06T16:23:00Z with the code committed as 7a14ba1 (16:23:09Z); 2026-27 decided by the earlier invocation (16:13:04Z) of the same run directory and left complete; 218aadf (main) changes report.py only",
+  "verified 2026-11-06: --verify-baseline replays from the caches gave byte-identical canonical packages, decisions and scores for 2024-25 and 2023-24 x minimal_model and for 2026-27 x all four policies"
+ ],
+ "policies": [
+  "minimal_model",
+  "form_restrained",
+  "hold",
+  "lagged_crowd"
+ ],
+ "policy_settings": {
+  "minimal_model": {
+   "name": "minimal_model",
+   "settings": {
+    "allowed_chips": [
+     "wildcard",
+     "freehit",
+     "bboost",
+     "3xc"
+    ],
+    "chip_rule": {
+     "bb_bench_xp": 12.0,
+     "fh_blank_players": 4,
+     "tc_captain_xp": 9.0,
+     "wc_gain": 12.0,
+     "wc_horizon": 5
+    },
+    "objective": "multi_gw",
+    "planner": {
+     "decay": 0.85,
+     "horizon": 3,
+     "restrained": "transfers <= free transfers, never a hit",
+     "time_limit": 60.0
+    },
+    "source": "model",
+    "wide_pool": [
+     [
+      1,
+      10
+     ],
+     [
+      2,
+      30
+     ],
+     [
+      3,
+      30
+     ],
+     [
+      4,
+      20
+     ]
+    ]
+   },
+   "version": "1"
+  },
+  "form_restrained": {
+   "name": "form_restrained",
+   "settings": {
+    "allowed_chips": [
+     "wildcard",
+     "freehit",
+     "bboost",
+     "3xc"
+    ],
+    "chip_rule": {
+     "bb_bench_xp": 12.0,
+     "fh_blank_players": 4,
+     "tc_captain_xp": 9.0,
+     "wc_gain": 12.0,
+     "wc_horizon": 5
+    },
+    "objective": "multi_gw",
+    "planner": {
+     "decay": 0.85,
+     "horizon": 3,
+     "restrained": "transfers <= free transfers, never a hit",
+     "time_limit": 60.0
+    },
+    "source": "baseline",
+    "wide_pool": [
+     [
+      1,
+      10
+     ],
+     [
+      2,
+      30
+     ],
+     [
+      3,
+      30
+     ],
+     [
+      4,
+      20
+     ]
+    ]
+   },
+   "version": "1"
+  },
+  "hold": {
+   "name": "hold",
+   "settings": {
+    "allowed_chips": [
+     "freehit",
+     "bboost",
+     "3xc"
+    ],
+    "chip_rule": {
+     "bb_bench_xp": 12.0,
+     "fh_blank_players": 4,
+     "tc_captain_xp": 9.0,
+     "wc_gain": 12.0,
+     "wc_horizon": 5
+    },
+    "source": "baseline"
+   },
+   "version": "1"
+  },
+  "lagged_crowd": {
+   "name": "lagged_crowd",
+   "settings": {
+    "allowed_chips": [
+     "wildcard",
+     "freehit",
+     "bboost",
+     "3xc"
+    ],
+    "chip_rule": {
+     "bb_bench_xp": 12.0,
+     "fh_blank_players": 4,
+     "tc_captain_xp": 9.0,
+     "wc_gain": 12.0,
+     "wc_horizon": 5
+    },
+    "rule": "free transfers toward the most-owned legal squad",
+    "source": "baseline",
+    "tier": "10000"
+   },
+   "version": "1"
+  }
+ },
+ "planner": {
+  "horizon": 3,
+  "decay": 0.85,
+  "time_limit": 60.0,
+  "restrained": "transfers <= free transfers, never a hit"
+ },
+ "chip_rule": {
+  "bb_bench_xp": 12.0,
+  "tc_captain_xp": 9.0,
+  "fh_blank_players": 4,
+  "wc_gain": 12.0,
+  "wc_horizon": 5
+ },
+ "chip_priority": [
+  "wildcard",
+  "freehit",
+  "bboost",
+  "3xc"
+ ],
+ "wide_pool": [
+  [
+   1,
+   10
+  ],
+  [
+   2,
+   30
+  ],
+  [
+   3,
+   30
+  ],
+  [
+   4,
+   20
+  ]
+ ],
+ "wide_cheapest": 5,
+ "lagged_tier": "10000",
+ "seeds": {
+  "model_seed": 20261023,
+  "model_seed_per_gw": "model_seed + gw",
+  "leak_seed": 20261106,
+  "leak_k": 3
+ },
+ "model": {
+  "version": "v0.2.1",
+  "n_sims": 1000,
+  "forecast_version": "1",
+  "forecast_horizon": 5,
+  "low_history_gws": 3
+ },
+ "rules_versions": {
+  "2021-22": "2021-22.1",
+  "2022-23": "2022-23.1",
+  "2023-24": "2023-24.1",
+  "2024-25": "2024-25.1",
+  "2025-26": "2025-26.1",
+  "2026-27": "2026-27.2"
+ },
+ "asknown": {
+  "manifest_sha256": {
+   "coreinsights.json": "bf958f26b1998f8bcf98c3c626a93c328d8c41aa856db583883ee2cad0830329",
+   "fixtures_asknown.json": "4b55740602a76860948938bfb5fa79a565853d4ca4128c973b0a7a06a7714478",
+   "footballdata.json": "b02e1e93a28ce812c3e547b3db999c0da8cca01619e6e9eedd5a5a3155f196f3",
+   "fpl_optimized.json": "f78055fa25e06022357cd1f5a832b43ea74eee4789725472265c125bfdd529e8",
+   "fplcache.json": "a57be70df2135cb868372aad035456f9a783c32f4def17214a8a53e20fbac695",
+   "uefa.json": "397ae3ba93b54f4ffc3a1db9044d1469f0668b9fd89ebd25f9963f4df49d190b"
+  },
+  "deadlines_sha256": "40d3b4f8901245ab052d1680e23a5a58b0ad619faf63f40109ae82a32961c329",
+  "report_sha256": "f15ef8a6db8cb75b3c84b83af8f9b1cf3c5feed0d7349bb0b22d2ad9527469b3"
+ },
+ "points_history_sha256": "305bb613a0a5249c215e3d83037245113babfd6680014c43c69aae322dfbeaa3",
+ "forecast_cache": {
+  "digest": "2bc42d9697d00b1c051240e38704f2c79ac9e5838599a19c220863a010cb0da7",
+  "per_season": {
+   "2021-22": {
+    "files": 38,
+    "digest": "a33ce580575fcddaa64dd3f8af7dcff87295cf265a2e77093d668edc5819cc54"
+   },
+   "2022-23": {
+    "files": 38,
+    "digest": "aaf0f6a6a1041fdf8ed5c070d8b1b2f8333837ac9d623dc9a8f384116e1f8dee"
+   },
+   "2023-24": {
+    "files": 38,
+    "digest": "6e7659c57d0a74ec96e70faf565387851116691c01a91a58193e7620ff10f2ae"
+   },
+   "2024-25": {
+    "files": 38,
+    "digest": "53e011b30f3e34decaf337efebb0001420bc0d18b6efe01a872e70acba2d378a"
+   },
+   "2025-26": {
+    "files": 38,
+    "digest": "652500e28c18b94d0a2d1958bf60e18b07dd3eed02fea94d285512ab921f2cfc"
+   },
+   "2026-27": {
+    "files": 9,
+    "digest": "b7b7a449ca5550b04664e5ff861e0370aa5d763d8d25e65137dfc4a7454d7091"
+   }
+  }
+ },
+ "logs": {
+  "2021-22": {
+   "rows_csv_sha256": "dac8701d0a882388b0e503f6745b5a916c23c8d475894bc01b3ba944ca267546",
+   "policies": {
+    "minimal_model": {
+     "sha256": "897d4b56ad9070725b34f7b76d8cf695402d41742411b92f46f9b6d3f069020e",
+     "packages": "8f017ff73fc00b51db3f2cce347646b2bec5cdc1aa59a73ccdf3004d78e528a1",
+     "decisions": "5d318163205c255e3160db94ec367ffafb6384f2fa25061c72da77d847df48d0",
+     "scores": "750ff117d52f6aa33a9d317141c69a6c5a9a391756689aaa73190ff49c48327b",
+     "gws": 38,
+     "total_net": 2232
+    },
+    "form_restrained": {
+     "sha256": "06b72dc314e6e6c6ec4ebe47bb737f162adfa37d2f626b7957756cf010c0cb36",
+     "packages": "a7f482d6ddf8b8a5e8c2ce8485f29117acf8c6aacdfe926dbd800b8d7e6fae32",
+     "decisions": "74edb93444a230c60ee53260974f9332d7ad5f21ed84933d27fb61d1be4f386e",
+     "scores": "8c8291cf7001390df19c5d8d739a04850680466fae8dd0cb42e5b1eb2d6538d4",
+     "gws": 38,
+     "total_net": 2099
+    },
+    "hold": {
+     "sha256": "88a8c1165d3df0a181e4f6ad9b86bcb4eff2543588a8b6a16d25c10509e902e3",
+     "packages": "71f0b4098f0538618563ebc3dea05ba7fb8a0fd59f3c236f7c222926ddf984d8",
+     "decisions": "fd5b07e996674ae0c4851f3cf851e548697484bc82d5866c7b7c5b854be04704",
+     "scores": "b3b8ec64b182870555fe5ac4025a08b307fa0b43087e1465f98b9c623f7cd681",
+     "gws": 38,
+     "total_net": 1458
+    },
+    "lagged_crowd": {
+     "sha256": "53ad0108954d93d9906eba2af92da6f3bbe5652b84685383843f6044170256ca",
+     "packages": "930beb229d7c417f6271782b5bb9af8eb4a545c641ec2706b9b09e6a3e2c3b55",
+     "decisions": "c3570c39b0b90221956861a246baaf27f76c8bd2ef846684091055309942fbe4",
+     "scores": "531705f8d69b76f4ec0c1eaaa67eaf37cb94405666f853a6152d22b9b14a828a",
+     "gws": 38,
+     "total_net": 2094
+    }
+   }
+  },
+  "2022-23": {
+   "rows_csv_sha256": "a9f1edd93f84c24babe5ee93e690b66e8455c6221d5db3e84b2ef70d1f301adc",
+   "policies": {
+    "minimal_model": {
+     "sha256": "b86dcb682eba738884d8bed7e600a3a62352dd5fda70ec2203351f1c0fdc932f",
+     "packages": "caa9e7789f09fbe8c94f1e34ead447b583fe4670ecfa09c1ec4aca70c91e45ab",
+     "decisions": "fce4b69638a7c1348add3e3c8472ff1e5afc634767c08ab027d88b9e60232a18",
+     "scores": "51d656ee90e57859ae6f2e2738c79070ede85d6fe6cf6d07ce5a6afd09385740",
+     "gws": 38,
+     "total_net": 2260
+    },
+    "form_restrained": {
+     "sha256": "a9540298fdd59b03d71ea4a317e9001837217d788a0c6912e3e2aa2f94c0075d",
+     "packages": "790322076c649a09f06631730a0c390377c3e1158dc3af0501db4a8b69d717b1",
+     "decisions": "96e166f41398d642328f44a4c20aef27a984f52920e7046bdf2f0603ec09a924",
+     "scores": "1b4e192e6c461ff8212ff0e36db5123277af3130cf634f9a7a8806e718ae0957",
+     "gws": 38,
+     "total_net": 2116
+    },
+    "hold": {
+     "sha256": "1125324d54527c6376511d36c448ed1180c768be07f194e20664f63e6088e40f",
+     "packages": "3ed091af5e29837ee78a287c4f300aa46113b530b251395893984e98e77d862a",
+     "decisions": "67ede89de9be70666407e8286da8264b8a0b18b0d89f7f10a6781cac2a5fee77",
+     "scores": "e4df65ba27b163c89638a0d880fb5b0d7ef65ddb44898e9d01692eeaa8768e85",
+     "gws": 38,
+     "total_net": 1516
+    },
+    "lagged_crowd": {
+     "sha256": "0510c2e438bc450049f3beaf2dea70437018b207c57bf1a9d41e5f462667f21b",
+     "packages": "6d6bbd5f86d599bfba103a14a61e2bfabb29756f220a47530cdecac14b61447d",
+     "decisions": "13d6e4e133f02ee60349dd97e186aeb411cb9ee89bf322faa37b8e9e2ebec07d",
+     "scores": "fea6cb551cce84348e838513778a71048492d85f2d42e45c76f76e48a35d831b",
+     "gws": 38,
+     "total_net": 2145
+    }
+   }
+  },
+  "2023-24": {
+   "rows_csv_sha256": "220665cdadab7bcd2130de0068fa956c36e09ae797ed92dfbec2c0a9b8f8f31d",
+   "policies": {
+    "minimal_model": {
+     "sha256": "8d89c78efc750a50f6e5533870da2a3192225423ee34540ed94e8514a4e7bb02",
+     "packages": "cab07868f52c9839802d4d7afeeefab6843140ebdc990be26c44c7ddb92b4ba9",
+     "decisions": "5fd206d8ea6906785e37541b3adfb9fa23fb1fc3f142168300ba22501e3c1a42",
+     "scores": "019c7631dfe57f2bd7311cdf406c93d03649000e772d22c9e432df41e7c20916",
+     "gws": 38,
+     "total_net": 2270
+    },
+    "form_restrained": {
+     "sha256": "264960a65d31c1452fd00fee8816afa5402ead642569198383651250abd08eeb",
+     "packages": "3a86d24735578b1926d0693113fa59fa2094cb0150836e1a34bc5b318620846a",
+     "decisions": "66072a2d5849c00de34239135339fc01de760c2870992f3335ae93e3ad68d06a",
+     "scores": "f73ee6cf2d6dc96fad80cb32a89842a4d2fc16e1cba52f2203f1e1471df5d611",
+     "gws": 38,
+     "total_net": 2132
+    },
+    "hold": {
+     "sha256": "32fc29fccbc3dc1d8baf4ef2d08ccd508a3ae54c3b91ef719129697e9f01dd08",
+     "packages": "a3112522bb64eb9119b6e8c64c3545d7e0b56aa7245189e62080cf59dcf58d9e",
+     "decisions": "5ae3f823d0ad59290a81bd632d4edd1a2fd6035108599336fb4506bd8afdeefc",
+     "scores": "b095314221ffc03bd41408a37dd960bfd0878f44abb249f6ec556565c010760e",
+     "gws": 38,
+     "total_net": 1594
+    },
+    "lagged_crowd": {
+     "sha256": "382523bf637abb73d2a18c49b733591a98f390bced410ec02f0d056b0c4a4aee",
+     "packages": "22519a24cabe87903777e884d75066c8b4e8dd15bece891affa6b5f18eecb28d",
+     "decisions": "cf6ebad2e07a3f8a95f24a28028a971a3e21b012ef011e8d94277ae13e5979b6",
+     "scores": "4e64e3b8f95481bf123f0ccb4b81338a09e947e705c2d638f239bc3cb2fceb1b",
+     "gws": 38,
+     "total_net": 2206
+    }
+   }
+  },
+  "2024-25": {
+   "rows_csv_sha256": "59c681b665dd1918933add5245871e879d766fd840cc4e4189c8685176ec340c",
+   "policies": {
+    "minimal_model": {
+     "sha256": "b5f756d89c1244ee1b47a4294fe2ade8eb23e5717293db72c5583631a6713f63",
+     "packages": "63cf0297520ce89a4299a0d001af7cd0f9220636fb653bbbef67c14dec351b9c",
+     "decisions": "0ac13bbc50c08a0e1f7b66dcd8f284f1b95528c5b7e192c8c57817b7c0dc9fec",
+     "scores": "f28b2b6b659c1aaca44faa5f96b96920029770b26a2c0bd7e98fbc2dbe8cd2a6",
+     "gws": 38,
+     "total_net": 2444
+    },
+    "form_restrained": {
+     "sha256": "84112c6b7012002249c8ba3104934eedf8c82aa73fc367cedeb67ea3e6be6398",
+     "packages": "ef9e48eedb5d09a3f21d34ac0c8d130fe8ad53ed3963abed44f95f97dbdc8b1d",
+     "decisions": "9d1db1a1dcc4898a80ad4671aea35346815b63e408b60e21ec277a2424edaa72",
+     "scores": "14331dddba79948e3536be87cf5f1b355b1a07297bdf91b42767b28577c7168d",
+     "gws": 38,
+     "total_net": 2128
+    },
+    "hold": {
+     "sha256": "ccbfc4f25c53b277b4cccebdc346f264cc6a88b5245f959f7b4de2b19a5daabc",
+     "packages": "60e523f5e6f2e661de013e177c668d31ad7326f90afcf6a5843649bb388640c9",
+     "decisions": "4a06b3002bcb46986c3c0264bae881e4baa36f321a6b92876b614b35dc05b17a",
+     "scores": "7b85102381601c5f7b69fbff8f4c2687203e2036cbe52a508d06bfe852f22fd9",
+     "gws": 38,
+     "total_net": 1932
+    },
+    "lagged_crowd": {
+     "sha256": "a99e71c8efd11d1c21ba96d1c9eb37560931c2cc4433529675570ea598cf4961",
+     "packages": "1e4d4fe844c8f53929fd7811df5a4f6fad961c1c63438a12ebdf7cebb217ddd8",
+     "decisions": "09d0fbca5522384651c27127b4db30ab8e71e411174f0135ea5d0ae0a35a4e6f",
+     "scores": "e1470b7911ed006faea321702ac451b804052aec5229d3dfbeaa4590fe64fa75",
+     "gws": 38,
+     "total_net": 2091
+    }
+   }
+  },
+  "2025-26": {
+   "rows_csv_sha256": "1b0200d4a930a5511710103ee428fa11382b38b60a338a4acaf8bb7080c239ee",
+   "policies": {
+    "minimal_model": {
+     "sha256": "075efff3410369b96684fd2df4880a50b2050cef81994b060f46a73cdd89bc69",
+     "packages": "826aa72f7c5da8c1a5f12863dba65fb5f285279f1517e5f76405b98714a8015b",
+     "decisions": "2d856042b965b37af7592b088223c3c6a70167f0c8b52fc301422e1b3401ea7c",
+     "scores": "eda488e39e98db7796fe9e52ccb91bfb4c4198c890c8f05133a3b5d13cd65083",
+     "gws": 38,
+     "total_net": 2126
+    },
+    "form_restrained": {
+     "sha256": "7c6703762e42500d2eeff8ad6bd80df5b78d205b50ff1134831619fb3abc8f39",
+     "packages": "70fe5d9760447c6d49352f9890cc950d7010fe6d22d7c929fcebbe03c6756128",
+     "decisions": "a01f1a2185b84c0f256919673d09d936005fb87cd6fe51cdd5ce476c1fbac78e",
+     "scores": "a9ac155deb291301063702a31a0e0bfa3bbabaab8c98bb4eda03a8b96080ee1a",
+     "gws": 38,
+     "total_net": 1915
+    },
+    "hold": {
+     "sha256": "91705d68528ee6770e17e187afe8103a50e4063a463c49b1d3fdb3073c117010",
+     "packages": "545465a129af528b2102efe6306e358c941f30f488dfad4019fd734bf35c5f96",
+     "decisions": "83d295665e34c7d1f96fa643166c50015d5865443cb043fe50261f4bb60286d4",
+     "scores": "b708fddb7e466b0b5a8e3ca22a0506cfd9f94babc1965f5227491ba1cbf5c96d",
+     "gws": 38,
+     "total_net": 1721
+    },
+    "lagged_crowd": {
+     "sha256": "1b1ce340273b36033fdb3381735e05859215a1fb328fdd66f4b2962493c101fe",
+     "packages": "b29039e143e224452ed4e508f6617ef7c30c6a2cfcfc9831fc18187f4ce388cc",
+     "decisions": "7014235bc979fdb9c4bad39b4963e9bcec614d5ff2a0e7b3dacc1ad29c0d347f",
+     "scores": "fb00c12c6eca4a7c5a304c7f21d87b0c7fafa2401aa5122b730926dab92c01ee",
+     "gws": 38,
+     "total_net": 1719
+    }
+   }
+  },
+  "2026-27": {
+   "rows_csv_sha256": "fa7bbe9fce656d49f6970b208bb87451c0032832b42077b1ae9ac056537a07d0",
+   "policies": {
+    "minimal_model": {
+     "sha256": "eeaffec7a47876f49f973fc45461a2dcf1e1e62ddfab829090c880d8da9ebbc3",
+     "packages": "cdc8751f5ba8824c268945e3fcbc4b3c4a398b22c16c4e1b43a77cf289b64592",
+     "decisions": "5939b744c1fa0b25557afa56ac6e4d0ed19718cc190ef693fd851e982233a44f",
+     "scores": "efb0df046aa96c20b34286e48f6fa50fcd64b0d07bd160e80333613facc440ee",
+     "gws": 9,
+     "total_net": 527
+    },
+    "form_restrained": {
+     "sha256": "a8318f11a7cb2f09385e9cf9225b8737f480fabdb800daa25504bfd37b65e74b",
+     "packages": "2f15685c1f4ec72129b618f4a3444ee740312ef3ed81fe1ee06469bdd97a8d18",
+     "decisions": "c29f07dacb7e8ca553be7a6d9ba0f221a6b0a1f53808d54c0e98b0526d9e4da6",
+     "scores": "408d5c7e3ff9f0454c6eb3725945167c2b251b210ea2d03190b61dac50966caf",
+     "gws": 9,
+     "total_net": 473
+    },
+    "hold": {
+     "sha256": "76b63580a36937a3d58cfa345c288cf5c882e6e3b47c2d0c0331cc3f7f79ca88",
+     "packages": "d915319db3b64ba24475497623c38c569856b23cfaf3c0106d932239573b04b5",
+     "decisions": "ebe6a4a5c9c1801d70874b5ae2995ecc3b5f453ff84aa4d95a66eaebcf8835b9",
+     "scores": "a06488962b0b659f973b4d02a4788aaebcfd70a99f87648641f6f58149e563e0",
+     "gws": 9,
+     "total_net": 463
+    },
+    "lagged_crowd": {
+     "sha256": "90531a2483b501634dd10c600f698c82b3a6e593d846dfb59434f2b928ccd33e",
+     "packages": "819a4121e2ab2444893c6a1224a7aa23999e4f2f04af3e20f0521411cf6766c7",
+     "decisions": "299834e3cc675f961f4d8253aef9c03d38685b16256c64205cabc12c59f0523b",
+     "scores": "e1637eebd277f73d3c36381877d3e8af4a5f66f1d9bd846267924668fc457a75",
+     "gws": 9,
+     "total_net": 562
+    }
+   }
+  }
+ },
+ "environment": {
+  "python": "3.11.11",
+  "highspy": "1.15.1",
+  "scikit-learn": "1.9.1",
+  "numpy": "2.4.6",
+  "pandas": "3.1.0",
+  "scipy": "1.17.1",
+  "pyarrow": "26.0.0"
+ },
+ "canonical_form": "per GW json.dumps(sort_keys=True) of the decision record without decide_seconds and package.solver.seconds (packages / decisions) and of the score row (scores); sha256 over the lines in GW order (fpl_rocket.replay.baseline)"
+}

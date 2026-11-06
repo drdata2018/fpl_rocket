@@ -75,7 +75,17 @@ def forecast_digest(inp) -> str:
     return f"{m['asknown_digest']}-{m['history_digest']}-{MODEL_BASE_VERSION}-f{forecast.FORECAST_VERSION}"
 
 
-def forecasts_for(inp, cache_dir: str | Path | None) -> forecast.Forecasts:
+def forecasts_for(inp, cache_dir: str | Path | None, require_cache: bool = False) -> forecast.Forecasts:
+    if require_cache:
+        p = forecast.cache_path(cache_dir, inp.season, inp.gw) if cache_dir is not None else None
+        ok = p is not None and p.exists()
+        if ok:
+            with p.open("rb") as fh:
+                ok = pickle.load(fh).get("digest") == forecast_digest(inp)  # noqa: S301 - our own cache
+        if not ok:
+            raise RuntimeError(
+                f"{inp.season} GW{inp.gw}: forecast cache miss (digest {forecast_digest(inp)})"
+            )
     return forecast.load_or_build(inp, cache_dir, forecast_digest(inp))
 
 
@@ -89,7 +99,13 @@ def run_season(
     cache_dir: str | Path | None = None,
     gws: list[int] | None = None,
     log: Callable[[str], None] = print,
+    require_cache: bool = False,
+    policies: dict[str, Policy] | None = None,
+    forecast_hook: Callable[[forecast.Forecasts, Any], forecast.Forecasts] | None = None,
 ) -> pd.DataFrame:
+    """`require_cache`: stop when a forecast is not in the cache (baseline verification). `policies` /
+    `forecast_hook` (fc, inputs) -> fc: diagnostic variants only (fpl_rocket.replay.variants); the defaults
+    are the frozen policies and forecasts."""
     rules = season_rules(season)
     out = Path(out_dir) / season
     out.mkdir(parents=True, exist_ok=True)
@@ -98,7 +114,7 @@ def run_season(
     if not todo:
         log(f"{season}: complete")
         return pd.read_csv(rows_path)
-    policies = {n: p for n, p in make_policies().items() if n in todo}
+    policies = {n: p for n, p in (policies or make_policies()).items() if n in todo}
     states: dict[str, engine.ManagerState | None] = {n: None for n in todo}
     files = {n: (out / f"{n}.jsonl").open("w", encoding="utf-8") for n in todo}
     snapshots: dict[str, dict[int, engine.ManagerState]] = {n: {} for n in todo}
@@ -111,7 +127,9 @@ def run_season(
             if viol:
                 raise RuntimeError(f"{season} GW{gw}: inputs stamped after T: {viol}")
             manifest = inp.manifest()
-            fc = forecasts_for(inp, cache_dir)
+            fc = forecasts_for(inp, cache_dir, require_cache)
+            if forecast_hook is not None:
+                fc = forecast_hook(fc, inp)
             results = store.results(season, gw)
             line = []
             for name in todo:

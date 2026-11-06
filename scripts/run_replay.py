@@ -12,6 +12,12 @@ Phases (all by default, in order):
     leak       the built-in leakage test: K = 3 deadlines per season (fixed seed), rows after T corrupted
     report     <out>/REPORT.md (fpl_rocket.replay.report)
 The points history (data/replay_inputs/points_history.parquet) is rebuilt from data/archive first.
+
+    uv run python -I scripts/run_replay.py --verify-baseline baseline_v0 --seasons 2024-25 2023-24 \
+        --policies minimal_model
+replays the chosen seasons / policies from the caches (history and forecast cache checked against the frozen
+sha256 first; nothing rebuilt) and asserts byte-identical canonical packages, decisions and score rows
+(fpl_rocket.replay.baseline; frozen record src/fpl_rocket/replay/baselines/<name>.json).
 Solver limit 60 s per plan; a solver fallback is a logged event (decision log, report), never silent.
 """
 
@@ -30,8 +36,8 @@ from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from fpl_rocket.replay import baseline, run  # noqa: E402
 from fpl_rocket.replay import inputs as I  # noqa: E402
-from fpl_rocket.replay import run  # noqa: E402
 from fpl_rocket.replay.policies import POLICY_NAMES  # noqa: E402
 
 SEASONS = ("2021-22", "2022-23", "2023-24", "2024-25", "2025-26", "2026-27")
@@ -78,6 +84,73 @@ def _leak_task(season, out, history, policies, gws, log_path) -> str:
     return season
 
 
+def _verify_task(season, out, history, cache, policies, log_path) -> str:
+    log = _logger(Path(log_path))
+    run.run_season(
+        season,
+        out,
+        _store(history),
+        policy_names=tuple(policies),
+        cache_dir=cache,
+        log=log,
+        require_cache=True,
+    )
+    return season
+
+
+def verify_baseline(name: str, seasons: list[str], policies: list[str], out: Path, workers: int) -> int:
+    """Replay the chosen seasons / policies from the caches (never rebuilt: a cache miss stops the run) and
+    assert that the canonical packages, decisions and score rows are byte-identical to the frozen baseline
+    (fpl_rocket.replay.baseline). Returns 0 when every pair is identical."""
+    rec = baseline.load(name)
+    log = _logger(out / "verify.log")
+    history = I.INPUTS_DIR / I.HISTORY_FILE
+    log(
+        f"verify {name} (commit {rec['commit'][:7]}, run {rec['run']}): seasons {seasons}; "
+        f"policies {policies}"
+    )
+    if baseline.sha256_file(history) != rec["points_history_sha256"]:
+        log("FAIL: the points history differs from the baseline's (sha256)")
+        return 1
+    fcr = baseline.forecast_cache_record(CACHE, seasons)
+    for s in seasons:
+        if fcr["per_season"][s] != rec["forecast_cache"]["per_season"][s]:
+            log(f"FAIL: the forecast cache of {s} differs from the baseline's")
+            return 1
+    log("inputs: points history and forecast cache identical to the baseline's")
+    with ProcessPoolExecutor(max_workers=min(workers, len(seasons))) as pool:
+        futs = [
+            pool.submit(
+                _verify_task, s, str(out), str(history), str(CACHE), policies, str(out / "verify.log")
+            )
+            for s in seasons
+        ]
+        for f in as_completed(futs):
+            log(f"replayed {f.result()}")
+    ref_dir = I.INPUTS_DIR.parent / "replays" / rec["run"]
+    failures = 0
+    for s in seasons:
+        for p in policies:
+            got = baseline.log_record(out / s / f"{p}.jsonl")
+            want = rec["logs"][s]["policies"][p]
+            keys = ("packages", "decisions", "scores", "gws", "total_net")
+            same = all(got[k] == want[k] for k in keys)
+            detail = ""
+            if not same:
+                failures += 1
+                ref = ref_dir / s / f"{p}.jsonl"
+                if ref.exists():
+                    cmp = baseline.compare_logs(ref, out / s / f"{p}.jsonl")
+                    detail = "; ".join(f"{k} differ in GWs {cmp[k]['different']}" for k in keys[:3])
+            log(
+                f"{s} {p}: {'IDENTICAL' if same else 'DIFFERENT'} "
+                f"({got['gws']} GWs, total {got['total_net']}, "
+                f"packages {got['packages'][:12]} vs {want['packages'][:12]}) {detail}"
+            )
+    log(f"verify {name}: {'PASS' if not failures else f'FAIL ({failures} pair(s))'}")
+    return 1 if failures else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seasons", nargs="+", default=list(SEASONS))
@@ -87,7 +160,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--phases", nargs="+", default=list(PHASES), choices=PHASES)
     ap.add_argument("--no-rebuild-history", action="store_true")
+    ap.add_argument(
+        "--verify-baseline",
+        default=None,
+        metavar="NAME",
+        help="replay --seasons x --policies from the caches and assert byte-identical canonical packages "
+        "against replay/baselines/NAME.json (nothing is rebuilt)",
+    )
     args = ap.parse_args(argv)
+    if args.verify_baseline:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        out = Path(args.out or f"data/replays/verify_{args.verify_baseline}_{stamp}")
+        out.mkdir(parents=True, exist_ok=True)
+        return verify_baseline(args.verify_baseline, args.seasons, args.policies, out, args.workers)
     out = Path(args.out or f"data/replays/{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
     out.mkdir(parents=True, exist_ok=True)
     log_path = out / "run.log"

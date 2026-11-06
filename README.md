@@ -278,6 +278,39 @@ for 3 deadlines per season and requires identical packages. `REPORT.md` holds th
 fallbacks, leakage results, KNOWN_UNCERTAIN rules, paired block-bootstrap comparisons and the within-sample
 percentiles against the sampled managers.
 
+## Frozen reference baseline-v0 and its audits (step 4d)
+
+Every new candidate is compared with the frozen reference **baseline-v0** = replay run `20261106T151927Z`,
+produced by commit `7a14ba1` (git tag `baseline-v0`). `src/fpl_rocket/replay/baselines/baseline_v0.json`
+records the commit, every policy setting (planner horizon 3 / decay 0.85 / restrained rule, chip thresholds,
+pools, seeds), model v0.2.1 and forecast version, rules versions, sha256 of the as-known manifests and of the
+points history, the forecast-cache digest, and per season / policy the sha256 of the decision log and of
+`rows.csv` plus the canonical package / decision / score digests (`replay/baseline.py`: the decision record
+without its two wall-clock fields). The record was written by `scripts/freeze_baseline.py`.
+
+```bash
+uv run python -I scripts/run_replay.py --verify-baseline baseline_v0 --seasons 2024-25 2023-24 \
+    --policies minimal_model            # replays from the caches, asserts byte-identical canonical packages
+uv run python -I scripts/audit_replay.py --run data/replays/20261106T151927Z     # independent ledger audit
+uv run python -I scripts/run_attribution.py --seasons 2024-25 2023-24           # controlled variants
+uv run python -I scripts/replay_robustness.py --run data/replays/20261106T151927Z
+uv run python -I scripts/rank_map.py fetch && uv run python -I scripts/rank_map.py report \
+    --replay data/replays/20261106T151927Z                                      # real final-rank mapping
+```
+
+- `fpl_rocket/ledger_audit.py` - an independent re-scorer (no imports from the replay engine, planner or the
+  rules functions; rules DATA tables, the as-known prices and the raw points archive only): legality, budget
+  at selling / buying prices as known, free transfers, chip windows, XI, bench-driven auto-subs, armband,
+  points, chip-gain counterfactuals, compared row by row with the engine.
+- `fpl_rocket/replay/variants.py` - diagnostics only (no default changes): availability flags off (model cap /
+  form zeroing), chips off, imposed GW1 squad, fixtures as played, combinations, tie-break noise (1e-6).
+- `fpl_rocket/replay/robustness.py` - block bootstrap with block lengths 4 / 8 / 12, leave-one-season-out,
+  sign tests, top-10-GW share, from an existing run.
+- `fpl_rocket/rankmap.py` - season total -> real final overall rank from real managers' `past` seasons
+  (frozen cohort members + seeded random entries, >= 1 s per request, cache `data/raw/rankmap/`, entry ids and
+  FPL numbers only). Placements say where a total would have ranked; the replay policies never miss a week,
+  real managers include abandoned teams.
+
 ## Archive and backtest
 
 ```bash
