@@ -1,0 +1,46 @@
+# Keep the free Streamlit Community Cloud app (https://fpl-rocket.streamlit.app) awake: Community Cloud sleeps a
+# free app after a period without visitors, and only a real browser visit can press the sleep page's
+# "Yes, get this app back up!" button (an anonymous HTTP call to the resume endpoint is refused). This job is
+# that visitor: scripts/keepalive.py opens the app in headless Chromium (Playwright), presses the button when
+# the sleep page is shown, waits for the app to render and stays ~20 s. No credentials, no cookies kept.
+# Cron at :12 and :42 (GitHub runs only a fraction of scheduled runs on this repo, so it asks often), on demand
+# (Actions -> keepalive -> Run workflow) and on any push to the branch `trigger-keepalive`:
+#   git commit --allow-empty -m "trigger keepalive" && git push origin HEAD:trigger-keepalive -f
+# (on top of main: the workflow file must exist on the pushed commit). The job always runs `main`.
+# Playwright is installed here only (not in requirements.txt or any uv dependency group).
+name: keepalive
+
+on:
+  schedule:
+    - cron: "12,42 * * * *"
+  push:
+    branches: [trigger-keepalive]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit the app (wake it if asleep)
+        run: python -I scripts/keepalive.py

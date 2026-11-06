@@ -94,6 +94,11 @@ Community Cloud free tier, data jobs run on GitHub Actions and are published as 
   builds `main`. The pushed commit must contain `.github/workflows/bundle.yml` (GitHub reads the push trigger
   from it), so start from `main`, not from an empty orphan:
   `git checkout -b trigger-tmp main && git commit --allow-empty -m "trigger bundle" && git push origin HEAD:trigger-bundle -f && git checkout main && git branch -D trigger-tmp`.
+- **Keep-alive:** Community Cloud sleeps a free app without visitors and only a real browser can press its
+  wake button, so `.github/workflows/keepalive.yml` (cron :12/:42) runs `scripts/keepalive.py` (headless
+  Chromium via Playwright, installed in the workflow only) to visit, wake if asleep, and wait for the app to
+  render. Trigger it by hand: Actions -> keepalive -> Run workflow, or the same empty-commit push as above to
+  the branch `trigger-keepalive`.
 - **Switches** (code constants, changed by a commit): `SHOW_SHADOW_PLANS` in `src/fpl_rocket/config.py`
   (False = no plan is shown; True re-enables the plan UI as built), `REGISTRY_START_GW = 9` in
   `src/fpl_rocket/registry.py`, `BUNDLE_N_SIMS = 4000` in `src/fpl_rocket/model/config.py`, solver time

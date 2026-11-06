@@ -35,6 +35,17 @@ ALL_CHIPS = [
     {"name": n, "start_event": 1, "stop_event": 19} for n in ("wildcard", "freehit", "bboost", "3xc")
 ]
 
+# Real solves here run with a generous time limit, not the app's 10 s: HiGHS (one thread, fixed seed) is
+# deterministic as long as it stops on the optimality gap, never on the clock, so a loaded machine makes a
+# test slower but never changes its result (several of these MIPs take 5-15 s unloaded). The 10 s default is
+# asserted in test_time_limits_interactive_10_batch_60; the time-limit fallback is forced deterministically
+# (a mocked solver status, or a 1 ms limit that no solve can meet).
+TEST_TIME_LIMIT_S = 600.0
+
+
+def _settings(**kw) -> PlanSettings:
+    return PlanSettings(time_limit=TEST_TIME_LIMIT_S, **kw)
+
 
 # ------------------------------------------------------------------------------------------- solvers
 @pytest.mark.parametrize("solver", ["cbc", "highs"])
@@ -91,7 +102,7 @@ def assert_legal(inp, plan, *, club_limit: bool = True):
 @pytest.mark.parametrize("objective", [ONE_GW_NO_TRANSFERS, ONE_GW_WITH_TRANSFERS, MULTI_GW])
 def test_plans_are_legal_and_affordable(objective):
     inp = planner_input(bank=20)
-    plan = solve(inp, PlanSettings(objective=objective, horizon=3))
+    plan = solve(inp, _settings(objective=objective, horizon=3))
     assert plan.status == "optimal", plan.reason
     assert_legal(inp, plan)
     if objective == ONE_GW_NO_TRANSFERS:
@@ -107,7 +118,7 @@ def test_budget_uses_selling_prices_for_outgoing_players():
     # every owned player sells for 1.0 less than now_cost: upgrades must be paid from selling prices
     squad = [Owned(o.element, o.element_type, o.team, o.selling_price - 10) for o in base]
     inp = planner_input(squad=squad, bank=0)
-    plan = solve(inp, PlanSettings(objective=ONE_GW_WITH_TRANSFERS, max_transfers=2))
+    plan = solve(inp, _settings(objective=ONE_GW_WITH_TRANSFERS, max_transfers=2))
     assert_legal(inp, plan)
     gp = plan.first()
     spent = sum(inp.pool[e].buy for e in gp.transfers_in)
@@ -117,7 +128,7 @@ def test_budget_uses_selling_prices_for_outgoing_players():
 
 def test_one_gw_no_transfers_matches_exact_best_xi():
     inp = planner_input()
-    plan = solve(inp, PlanSettings(objective=ONE_GW_NO_TRANSFERS))
+    plan = solve(inp, _settings(objective=ONE_GW_NO_TRANSFERS))
     squad = [o.element for o in inp.squad]
     score = {e: inp.xp[e, 1] for e in squad}
     best = best_xi(squad, inp.element_type(), score)
@@ -128,13 +139,13 @@ def test_one_gw_no_transfers_matches_exact_best_xi():
 
 def test_hits_taken_only_when_worth_it_and_ft_banked():
     inp = planner_input(free_transfers=1)
-    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=3, max_transfers=2))
+    plan = solve(inp, _settings(objective=MULTI_GW, horizon=3, max_transfers=2))
     assert_legal(inp, plan)
-    no_hits = solve(inp, PlanSettings(objective=MULTI_GW, horizon=3, max_transfers=2, allow_hits=False))
+    no_hits = solve(inp, _settings(objective=MULTI_GW, horizon=3, max_transfers=2, allow_hits=False))
     assert no_hits.hits_total == 0
     assert plan.objective_value >= no_hits.objective_value - 1e-6
     # banking: with transfers forbidden in GW1 by a zero cap, the balance entering GW2 is 2
-    held = solve(replace(inp, free_transfers=1), PlanSettings(objective=MULTI_GW, horizon=2, max_transfers=0))
+    held = solve(replace(inp, free_transfers=1), _settings(objective=MULTI_GW, horizon=2, max_transfers=0))
     assert [g.free_transfers for g in held.gws] == [1, 2]
 
 
@@ -146,43 +157,48 @@ def test_club_limit_restored_or_infeasible_with_reason():
     squad = [o for o in squad if o not in mids] + [Owned(c.element, 3, 1, c.buy) for c in club1]
     assert Counter(o.team for o in squad)[1] == 4
     inp = planner_input(squad=squad, bank=0)
-    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=2, max_transfers=2))
+    plan = solve(inp, _settings(objective=MULTI_GW, horizon=2, max_transfers=2))
     assert plan.status == "optimal"
     assert_legal(inp, plan)  # 3 per club in EVERY GW, so GW1 already sells one of them
     assert any("club limit" in line for line in plan.explanation)
     # a plan that cannot transfer enough: infeasible with the reason, hold + best XI
-    stuck = solve(
-        replace(inp, free_transfers=0), PlanSettings(objective=MULTI_GW, horizon=2, allow_hits=False)
-    )
+    stuck = solve(replace(inp, free_transfers=0), _settings(objective=MULTI_GW, horizon=2, allow_hits=False))
     assert stuck.status == "fallback"
     assert "per-club limit" in stuck.reason and "team 1 (+1)" in stuck.reason
     assert stuck.transfers_total == 0
     # holding (objective a) keeps the squad as FPL does
-    held = solve(inp, PlanSettings(objective=ONE_GW_NO_TRANSFERS))
+    held = solve(inp, _settings(objective=ONE_GW_NO_TRANSFERS))
     assert held.status == "optimal" and held.transfers_total == 0
 
 
 def test_timeout_falls_back_to_hold_and_best_xi(monkeypatch):
     monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("timeout", "the solver reached its 10 s time limit"))
     inp = planner_input()
-    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=3))
+    plan = solve(inp, _settings(objective=MULTI_GW, horizon=3))
     assert plan.status == "fallback" and "time limit" in plan.reason
     assert plan.transfers_total == 0 and len(plan.gws) == 3
     assert plan.explanation[0].startswith("Fallback plan (hold the squad + best XI by xP)")
     assert_legal(inp, plan)
+    # the real solver at a 1 ms limit (no bound can be proven that fast on any machine): the same fallback
+    monkeypatch.undo()
+    real = solve(inp, PlanSettings(objective=MULTI_GW, horizon=3, time_limit=0.001))
+    assert real.status == "fallback" and real.time_limited and "time limit" in real.reason
+    assert real.transfers_total == 0 and len(real.gws) == 3
+    assert real.explanation[0].startswith("Fallback plan (hold the squad + best XI by xP)")
+    assert_legal(inp, real)
 
 
 def test_infeasible_budget_falls_back():
     pool, _ = league()
     squad = cheap_squad(pool)
     inp = planner_input(squad=squad[:14], bank=0)  # 14 players: composition cannot be fielded without a buy
-    plan = solve(inp, PlanSettings(objective=ONE_GW_NO_TRANSFERS))
+    plan = solve(inp, _settings(objective=ONE_GW_NO_TRANSFERS))
     assert plan.status == "fallback" and "expected 15" in plan.reason
 
 
 def test_deterministic_given_inputs():
     inp = planner_input()
-    settings = PlanSettings(objective=MULTI_GW, horizon=3)
+    settings = _settings(objective=MULTI_GW, horizon=3)
     runs = []
     for _ in range(2):
         p = asdict(solve(inp, settings))
@@ -199,23 +215,23 @@ def test_low_history_never_captain_nor_bought():
     best_buy = max((e for e in inp.pool if e not in owned), key=lambda e: inp.xp[e, 1])
     inp = replace(inp, low_history=frozenset({star, best_buy}))
     for obj in (ONE_GW_NO_TRANSFERS, ONE_GW_WITH_TRANSFERS, MULTI_GW):
-        plan = solve(inp, PlanSettings(objective=obj, horizon=2))
+        plan = solve(inp, _settings(objective=obj, horizon=2))
         for gp in plan.gws:
             assert star not in (gp.captain, gp.vice)
             assert best_buy not in gp.transfers_in
-    plan = solve(inp, PlanSettings(objective=ONE_GW_NO_TRANSFERS))
+    plan = solve(inp, _settings(objective=ONE_GW_NO_TRANSFERS))
     if star in plan.first().xi:
         assert any("insufficient history" in w for w in plan.warnings)
 
 
 def test_chip_scenarios_report_conditional_gains():
     inp = planner_input(chips=ALL_CHIPS)
-    settings = PlanSettings(objective=MULTI_GW, horizon=3)
+    settings = _settings(objective=MULTI_GW, horizon=3)
     base, scenarios = chip_scenarios(inp, settings)
     by = {s.chip: s for s in scenarios}
     assert set(by) == {"wildcard", "freehit", "bboost", "3xc"}
     for s in scenarios:
-        assert s.status == "solved", (s.chip, s.reason)
+        assert s.status == "solved" and not s.plan.time_limited, (s.chip, s.reason)
         assert s.evaluated == "GW1-GW3"
         assert s.gain >= -1e-6  # never worse than the plan without the chip (within solver tolerance)
         assert_legal(inp, s.plan)
@@ -226,13 +242,13 @@ def test_chip_scenarios_report_conditional_gains():
     assert by["bboost"].plan.gws[[g.gw for g in base.gws].index(by["bboost"].gw)].chip == "bboost"
     # outside the window: not available, no solve
     late = replace(inp, gws=[20, 21], xp={(e, g + 19): v for (e, g), v in inp.xp.items()})
-    _, sc = chip_scenarios(late, PlanSettings(objective=MULTI_GW, horizon=2))
+    _, sc = chip_scenarios(late, _settings(objective=MULTI_GW, horizon=2))
     assert all(s.status == "not available" and "window" in s.reason for s in sc)
 
 
 def test_free_hit_squad_reverts():
     inp = planner_input(chips=ALL_CHIPS, bank=150)
-    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=2, chip="freehit", max_transfers=0))
+    plan = solve(inp, _settings(objective=MULTI_GW, horizon=2, chip="freehit", max_transfers=0))
     assert plan.status == "optimal"
     fh, after = plan.gws
     assert fh.chip == "freehit" and set(fh.squad) != {o.element for o in inp.squad}
@@ -322,7 +338,7 @@ def test_from_planning_state_uses_low_ft_and_stamps_user_edits():
     assert edited.bank == 20 and edited.free_transfers == 2
     assert any(n.startswith("User-edited squad") for n in edited.notes)
     assert any(n.startswith("User-edited bank") for n in edited.notes)
-    plan = solve(edited, PlanSettings(objective=ONE_GW_NO_TRANSFERS))
+    plan = solve(edited, _settings(objective=ONE_GW_NO_TRANSFERS))
     assert plan.explanation[0].startswith("User-edited")
     # missing low_history column = all False
     assert from_planning_state(state, players, xp_df.drop(columns="low_history")).low_history == frozenset()
@@ -347,7 +363,7 @@ p += x <= 5
 p.solve(pulp.HiGHS(msg=False))
 assert pulp.LpStatus[p.status] == "Optimal"
 for _ in range(2):
-    plan = solve(planner_input(), PlanSettings(objective=MULTI_GW, horizon=3))
+    plan = solve(planner_input(), PlanSettings(objective=MULTI_GW, horizon=3, time_limit={time_limit!r}))
     print(plan.status, "|", plan.reason, "|", plan.explanation[0])
 """
 
@@ -359,9 +375,14 @@ def _run_scheduler_script(disable_reset: bool) -> list[str]:
 
     root = Path(__file__).resolve().parents[1]
     code = _SCHEDULER_SCRIPT.format(
-        src=str(root / "src"), tests=str(root / "tests"), disable_reset=disable_reset
+        src=str(root / "src"),
+        tests=str(root / "tests"),
+        disable_reset=disable_reset,
+        time_limit=TEST_TIME_LIMIT_S,
     )
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=2 * TEST_TIME_LIMIT_S + 120
+    )
     assert out.returncode == 0, out.stderr
     return out.stdout.strip().splitlines()
 
@@ -382,16 +403,16 @@ def test_a_solver_failure_is_an_explicit_error_never_a_silent_hold():
 def test_solver_error_status_and_time_limited_flag(monkeypatch):
     inp = planner_input()
     monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("solver_error", "the solver failed to run (x)"))
-    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=2))
+    plan = solve(inp, _settings(objective=MULTI_GW, horizon=2))
     assert plan.status == "solver_error" and not plan.time_limited
     assert plan.explanation[0].startswith("SOLVER ERROR, no plan was solved")
-    _, scenarios = chip_scenarios(planner_input(chips=ALL_CHIPS), PlanSettings(objective=MULTI_GW, horizon=2))
+    _, scenarios = chip_scenarios(planner_input(chips=ALL_CHIPS), _settings(objective=MULTI_GW, horizon=2))
     assert scenarios and {sc.status for sc in scenarios} <= {"solver_error", "not available"}
     assert all(sc.gain != sc.gain for sc in scenarios)  # no gain from an unsolved plan
     monkeypatch.setattr(core, "SOLVE", lambda *a, **k: ("timeout", "the solver reached its 10 s time limit"))
-    assert solve(inp, PlanSettings(objective=MULTI_GW, horizon=2)).time_limited
+    assert solve(inp, _settings(objective=MULTI_GW, horizon=2)).time_limited
     monkeypatch.undo()
-    plan = solve(inp, PlanSettings(objective=MULTI_GW, horizon=2))
+    plan = solve(inp, _settings(objective=MULTI_GW, horizon=2))
     assert plan.status == "optimal" and not plan.time_limited
 
 
