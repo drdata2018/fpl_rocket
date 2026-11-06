@@ -227,6 +227,37 @@ Manifest: `news_sources_fetched`, `news_items_matched` / `news_items_unmatched`,
 Known fragility: premierinjuries.com answers non-browser clients with a Cloudflare challenge (HTTP 403), so the
 injury table is usually empty in automated builds; `--injury-html <saved page>` reads a saved copy instead.
 
+## Frozen prospective cohorts (real managers)
+
+Plan v3 Phase 1e (`src/fpl_rocket/cohorts.py`): prospective comparisons with real managers use two cohorts
+whose membership was fixed BEFORE the scored period, with information available then. Results are reported as
+**"percentile within this cohort"**, never as an overall FPL percentile.
+
+- `random`: entry ids drawn uniformly (seeded) from 1..`total_players`; kept when the entry exists and is
+  ACTIVE = has a history row for each of the last 3 finished GWs; the first 1,500 that qualify. Rejections
+  (not found, inactive) are counted in the manifest, so the acceptance rate is known.
+- `top10k`: 1,500 positions drawn uniformly from a canonical top-10,000 list of the overall league (314): all
+  200 standings pages fetched twice (the league's order within ties changes between page fetches, so one pass
+  repeats some entries and misses others), distinct entries with rank <= 10,000 ordered by (rank, entry id).
+- Per member (ids and FPL numbers only, no names, no regions): overall rank, total points, value and bank after
+  the freeze GW, chips used up to it.
+
+Freeze (run once, 2026-11-06, freeze GW9, seed 20261106):
+`uv run python scripts/cohort_freeze.py --seed 20261106 --out <spike-log checkout>` writes
+`registry/cohorts/cohort_<YYYYMMDD>.json` and `cohort_<YYYYMMDD>_manifest.json` (seed, times, GWs, rules,
+counts, requests, sha256) on the data-only `spike-log` branch. Polite (>= 1 s between requests, backoff and a
+cool-down on 429/403) and resumable through `data/raw/cohorts/` (gitignored). The cohort file is immutable:
+`KNOWN_FREEZES` in `cohorts.py` holds its sha256 too, and the scorer refuses to run on any mismatch.
+
+Scoring: `.github/workflows/cohort_score.yml` (daily 07:30 UTC, Run workflow, or a push to `trigger-cohort`)
+runs `scripts/cohort_score.py`: for every finished, data-checked GW after the freeze not yet scored, one
+`entry/{id}/history/` call per member (staged; a partial fetch publishes nothing), then appends
+`registry/cohorts/cohort_scores.csv` (net points = points - hit cost, hits, total, overall rank, chip,
+cumulative net points since the freeze; members are never dropped: `no_row` / `not_found` rows) and rewrites
+`cohort_summary.csv` (n, mean, p10/p25/median/p75/p90, chip shares, cumulative versions).
+`cohorts.percentile_of(points, gw, cohort, cumulative=False)` reads the published scores (for the virtual-
+manager pages later; no UI yet).
+
 ## Archive and backtest
 
 ```bash

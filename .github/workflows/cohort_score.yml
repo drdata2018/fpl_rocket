@@ -1,0 +1,60 @@
+# Frozen prospective cohorts (fpl_rocket.cohorts, docs/PLAN_v3_blind_follow.md Phase 1e): daily at 07:30 UTC
+# (and on demand, or by a push to the branch `trigger-cohort`), score every finished and data-checked GW after
+# the freeze that has no row yet in registry/cohorts/cohort_scores.csv on the data-only branch `spike-log`.
+# One entry history call per cohort member (~3,000 at >= 1 s each); a partial fetch publishes nothing. The
+# scorer refuses to run when a cohort file's sha256 differs from its manifest.
+name: cohort-score
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+  push:
+    branches: [trigger-cohort]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cohort
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync environment (runtime dependencies only)
+        run: uv sync --locked --no-dev
+
+      - name: Prepare spike-log worktree
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --depth=1 origin spike-log:spike-log
+          git worktree add ../spike-log spike-log
+
+      - name: Score finished GWs after the freeze not yet scored
+        run: uv run --no-sync python scripts/cohort_score.py --dir ../spike-log/registry/cohorts --stage data/raw/cohorts/stage
+
+      - name: Commit and push (only when new rows were written)
+        if: ${{ !cancelled() }}
+        run: |
+          cd ../spike-log
+          git add registry/cohorts/cohort_scores.csv registry/cohorts/cohort_summary.csv 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "nothing new to commit"
+            exit 0
+          fi
+          git commit -m "cohorts: scores $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git push origin spike-log && exit 0
+            git pull --rebase origin spike-log
+          done
+          exit 1
