@@ -1,5 +1,9 @@
-gw,policy,label,status,flagged,reason,scored_at,bundle_id,points,hits,hit_cost,net,transfers,cumulative_net,gw_average,net_minus_average,cumulative_vs_average,transfers_total,hits_total,captain,vice,armband,auto_subs,xi,bench,transfers_in,transfers_out
-9,model_aggressive,"Model, aggressive",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
-9,model_restrained,"Model, restrained",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
-9,form_restrained,"Form, restrained",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
-9,hold,Hold (no transfers),not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,
+gw,policy,label,status,flagged,reason,scored_at,bundle_id,points,hits,hit_cost,net,transfers,cumulative_net,gw_average,net_minus_average,cumulative_vs_average,transfers_total,hits_total,captain,vice,armband,auto_subs,xi,bench,transfers_in,transfers_out,lead_time_minutes
+9,model_aggressive,"Model, aggressive",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,,
+9,model_restrained,"Model, restrained",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,,
+9,form_restrained,"Form, restrained",not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,,
+9,hold,Hold (no transfers),not_started,True,the trajectories have not started (no state at or before this GW),2026-11-04T14:16:35+00:00,,,,,,,0.0,47.0,,0.0,0,0,,,,,,,,,
+10,model_aggressive,"Model, aggressive",ok,False,start squad: no transfers,2026-11-09T15:57:19+00:00,20261106T121610Z,54.0,0.0,0.0,54.0,0.0,54.0,55.0,-1.0,-1.0,0,0,8.0,68.0,8.0,0.0,"1,8,115,175,259,68,154,40,124,399,411","497,173,272,165",,,373.8
+10,model_restrained,"Model, restrained",ok,False,start squad: no transfers,2026-11-09T15:57:19+00:00,20261106T121610Z,54.0,0.0,0.0,54.0,0.0,54.0,55.0,-1.0,-1.0,0,0,8.0,68.0,8.0,0.0,"1,8,115,175,259,68,154,40,124,399,411","497,173,272,165",,,373.8
+10,form_restrained,"Form, restrained",ok,False,start squad: no transfers,2026-11-09T15:57:19+00:00,20261106T121610Z,54.0,0.0,0.0,54.0,0.0,54.0,55.0,-1.0,-1.0,0,0,115.0,411.0,115.0,2.0,"1,115,8,173,124,68,40,154,399,411,165","497,259,175,272",,,373.8
+10,hold,Hold (no transfers),ok,False,start squad: no transfers,2026-11-09T15:57:19+00:00,20261106T121610Z,54.0,0.0,0.0,54.0,0.0,54.0,55.0,-1.0,-1.0,0,0,115.0,411.0,115.0,2.0,"1,115,8,173,124,68,40,154,399,411,165","497,259,175,272",,,373.8
